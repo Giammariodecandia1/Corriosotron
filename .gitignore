@@ -1,0 +1,8 @@
+# runtime, caches and local data (each tool folder has its own .gitignore too)
+.python-managed/
+.uv-cache/
+model_cache/
+tmp/
+**/tmp/
+# machine-specific list of YOLO model folders (v2)
+dinov2-corrosion-v2/modelli_oggetti/cartelle.json

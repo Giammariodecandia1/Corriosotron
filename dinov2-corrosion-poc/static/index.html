@@ -1,0 +1,170 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Eagle Projects | DINOv2 Corrosion Intelligence</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1420;--card:#162438;--line:#30445c;--text:#edf4fb;--muted:#aabccd;--accent:#54c7e9}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);font:15px/1.5 Segoe UI,system-ui,sans-serif;color:var(--text)}
+header{padding:22px clamp(15px,3vw,45px);border-bottom:1px solid var(--line);background:#111e2f;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+header b{font-size:23px;letter-spacing:.02em}header small{color:var(--accent);display:block;font-weight:bold;letter-spacing:.15em}
+main{max-width:1360px;margin:auto;padding:26px 20px 60px}h1{font-size:26px;line-height:1.2;margin:0 0 8px}h2{font-size:17px;margin:0 0 14px}
+.sub{color:var(--muted);margin-bottom:22px}.grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:20px;align-items:start}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;min-width:0}
+label,button,select{font:inherit}button,select,input[type=file]{background:#24405a;color:#fff;border:1px solid #4d6880;border-radius:8px;padding:10px}
+button{cursor:pointer;font-weight:650}button:disabled{opacity:.45;cursor:not-allowed}button.primary{background:#087ea0;border-color:#20a1c7}
+button:hover:not(:disabled){filter:brightness(1.15)}.row{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:13px 0}
+#photo{max-width:100%;font-size:13px}.types{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.types label{display:flex;align-items:center;gap:6px;padding:8px;background:#21344b;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.types label:has(input:checked){outline:2px solid var(--accent)}
+.swatch{width:12px;height:12px;border-radius:50%;display:inline-block}
+.photo-wrap{border:1px solid var(--line);background:#080d14;min-height:220px;max-height:70vh;border-radius:9px;overflow:auto}
+.photo-wrap #placeholder{display:block;text-align:center;padding:90px 12px}
+.photo-wrap #placeholder[hidden]{display:none}
+canvas{max-width:none;max-height:none;display:block;cursor:crosshair;touch-action:none}
+#note{font-size:13px;color:#b9d6e3;margin:10px 0}#error{white-space:pre-wrap;display:none;padding:12px;border-radius:8px;background:#512e36;color:#ffe1e1}
+#busy{display:none;color:#a3e2fd;margin:10px 0}.dim{color:var(--muted);font-size:13px}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:15px 0}
+.metric{background:#22354c;padding:13px;border-radius:8px;border:1px solid #3a526b}.metric span{font-size:12px;color:var(--muted);display:block}.metric strong{font-size:29px}
+#output{display:none}#overlay{display:block;width:100%;border-radius:8px;margin:12px 0;border:1px solid #53657a}
+.pct{display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding:8px 0;font-size:13px}
+.notice{background:#173449;color:#cee5f1;border:1px solid #36627c;padding:12px;border-radius:8px;font-size:13px;margin-top:16px}
+.report-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0}.report-fields label{display:block;font-size:12px;color:#b9d6e3}.report-fields input,.report-fields textarea{box-sizing:border-box;width:100%;margin-top:5px;padding:9px;background:#102439;color:#fff;border:1px solid #4d6880;border-radius:7px;font:inherit}.report-fields textarea{min-height:58px;resize:vertical}.report-fields .cluster-toggle{display:flex;align-items:flex-start;gap:8px;padding-top:20px;cursor:pointer}.report-fields .cluster-toggle input{width:auto;margin:2px 0 0;padding:0;flex:none}.report-fields .cluster-toggle small{color:#8fb0c2}
+@media(max-width:950px){.grid{grid-template-columns:1fr}}@media(max-width:480px){main{padding:16px 12px}section{padding:13px}.metrics{grid-template-columns:1fr 1fr}.report-fields{grid-template-columns:1fr}}
+</style></head><body>
+<header><div><small>EAGLE PROJECTS · RESEARCH POC</small><b>DINOv2 / Corrosion Intelligence</b></div><div class="dim" id="status">CPU · controllo stato...</div></header>
+<main><h1>Corrosione su sostegni AT/AAT</h1><p class="sub">Vision Transformer <b>Meta DINOv2-small reale</b>, inferenza locale su CPU. Stima sperimentale della corrosione sul metallo visibile nella foto o ROI.</p>
+<div id="error" role="alert"></div><div class="grid"><section><h2>01 · Fotografia e calibrazione</h2>
+<div class="row"><input type="file" id="photo" accept="image/jpeg,image/png,image/webp"><button id="startOver" type="button">Ricomincia</button></div><p id="photoStatus" class="dim">Nessuna fotografia caricata</p><div class="row"><label for="resolution">Risoluzione</label><select id="resolution"><option value="392">392 px · CPU veloce</option><option value="518" selected>518 px · più dettaglio</option></select><span class="dim">Foto grandi adattate localmente prima dell’analisi; limite server 18 MB / 40 MP</span></div>
+<div class="row"><label for="featureMode">Nuovo profilo</label><select id="featureMode"><option value="tiles_v1">Dettaglio · riquadri sovrapposti</option><option value="standard">Rapido · unico riquadro</option></select></div>
+<p id="extractionInfo" class="dim">Il dettaglio richiede più tempo su CPU. Nelle foto molto grandi la griglia DINOv2 adatta automaticamente la scala per restare entro 64 riquadri; il report indica i pixel originali per patch. Analizza e Aggiungi esempi riutilizzano modalità e risoluzione del profilo selezionato.</p>
+<div class="row"><b>Rimozione sfondo automatica</b><button id="maskRetry" type="button" disabled>Riprova maschera</button></div>
+<p id="maskStatus" class="dim" role="status">Carica una foto: BiRefNet genererà la maschera in locale.</p>
+<p class="dim">La ruggine è decisa dal colore del metallo sotto ogni marker: ingrandisci e clicca al centro del profilato, non sul bordo. Marca anche metallo sano <b>in ombra</b> e, se presenti, vernici o zincature diverse: i colori mai marcati restano «zone grigie».</p>
+<p class="dim">La maschera automatica esclude lo sfondo. Marca metallo sano e almeno una classe di ruggine realmente visibile. Se non vedi ruggine intensa, non marcarla: potrai aggiungerla al profilo con un'altra foto.</p>
+<div class="types">
+<label><input type="radio" name="cls" value="healthy" checked><i class="swatch" style="background:#21af8f"></i>Metallo sano</label>
+<label><input type="radio" name="cls" value="medium"><i class="swatch" style="background:#f9ca3d"></i>Ruggine media</label>
+<label><input type="radio" name="cls" value="intense"><i class="swatch" style="background:#ee3e58"></i>Ruggine intensa</label>
+</div><div class="row"><button id="roi" type="button">Seleziona ROI</button><button id="full" type="button">Intera foto</button><button id="undo" type="button">Annulla punto</button><button id="clear" type="button">Azzera punti</button></div>
+<div class="row"><button id="exclude" type="button" aria-pressed="false">Escludi isolatore</button><label for="exclusionDiameter">Larghezza (px)</label><input id="exclusionDiameter" type="number" min="4" max="600" value="70" style="width:85px"><button id="undoExclusion" type="button">Annulla esclusione</button><button id="clearExclusions" type="button">Azzera esclusioni</button></div>
+<p id="exclusionStatus" class="dim">Trascina lungo un isolatore, dal primo all’ultimo disco. Le zone viola saranno escluse dal conteggio.</p>
+<div class="row" aria-label="Zoom fotografia"><button id="zoomOut" type="button" aria-label="Riduci fotografia">−</button><button id="zoomFit" type="button">Adatta</button><button id="zoomIn" type="button" aria-label="Ingrandisci fotografia">+</button><span id="zoomValue" class="dim" aria-live="polite">100%</span><span class="dim">Ingrandisci, poi scorri la foto per posizionare i punti.</span></div>
+<div class="photo-wrap" id="photoViewport"><span id="placeholder" class="dim">Carica una fotografia</span><canvas id="canvas" hidden aria-label="Fotografia interattiva per selezionare punti e ROI"></canvas></div><div id="note">Ambito: intera foto. I valori NON rappresentano l'intero sostegno.</div>
+<div class="report-fields"><label for="operatorNotes">Note per il report (facoltative)<textarea id="operatorNotes" maxlength="180" placeholder="Osservazioni dell'operatore"></textarea></label><label class="cluster-toggle" for="clusterAnomalies"><input id="clusterAnomalies" type="checkbox"><span>Clusterizza anomalie<br><small>Numera le zone di ruggine più estese (A1, A2…) e aggiunge la pagina 2 al PDF</small></span></label></div>
+<div class="row"><label for="profileName">Nome nuovo profilo</label><input id="profileName" type="text" maxlength="64" placeholder="Es. Traliccio urbano · Brasile"><button class="primary" id="calibrate" disabled>Salva profilo e analizza</button></div>
+<div class="row"><label for="profileSelect">Profilo da usare</label><select id="profileSelect"><option value="">Nessun profilo nominato</option></select><button id="analyze" disabled>Analizza con profilo</button><button id="addSamples" disabled>Aggiungi esempi al profilo</button><button id="reset" disabled>Elimina profilo selezionato</button></div>
+<div class="row"><button id="calibrateDetail" disabled>Prova dettaglio ROI (temporanea)</button></div>
+<p class="dim">Crea un profilo con nome e marker iniziali. Per arricchirlo con altri sostegni, carica la nuova foto, marca esempi e premi <b>Aggiungi esempi al profilo</b>. Il profilo raccoglie vettori DINOv2, non conserva le fotografie. La prova di dettaglio non salva né modifica un profilo.</p>
+<div id="busy" role="status">DINOv2 sta elaborando su CPU. Alla prima esecuzione viene scaricato il checkpoint.</div><p class="dim" id="profile">Profilo: verifica...</p>
+</section><section><h2>02 · Risultati DINOv2</h2><p id="empty" class="dim">Carica una foto e avvia la calibrazione. I risultati compariranno qui.</p><div id="output">
+<div class="metrics"><div class="metric"><span>Ruggine classificata / metallo visibile</span><strong id="rust">—</strong></div><div class="metric"><span>Intensità relativa (1–2)</span><strong id="intensity">—</strong></div><div class="metric"><span>Metallo visibile / ROI</span><strong id="metal">—</strong></div><div class="metric"><span>Zone grigie da verificare / metallo</span><strong id="uncertain">—</strong></div></div>
+<div class="row"><label><input id="showAmbiguity" type="checkbox">Mostra solo zone ambigue (bianco)</label></div>
+<img id="overlay" alt="Mappa delle zone corrose sovrapposta alla fotografia">
+<p id="quality" class="notice"></p>
+<div class="pct"><span>Ruggine media / metallo</span><b id="medium">—</b></div><div class="pct"><span>Ruggine intensa / metallo</span><b id="intense">—</b></div><p id="timing" class="dim"></p>
+<div class="row"><button id="pdf">Scarica report PDF</button><button id="png">Scarica overlay PNG</button><button id="mask">Scarica maschera classi</button><button id="json">Scarica report JSON</button><button id="csv">Scarica report CSV</button></div></div>
+<div class="notice">PoC sperimentale, non validata. La percentuale deriva dai pixel classificati del <b>metallo visibile nella foto/ROI</b>, non dalla superficie tridimensionale totale del sostegno. La maschera di primo piano può includere cavi e isolatori: controllare la ROI e la maschera classi prima di usare il valore. L'intensità è relativa agli esempi marcati dall'operatore, non misura perdita di spessore o sicurezza strutturale.</div>
+</section></div></main>
+<script>
+(()=>{const el=id=>document.getElementById(id),canvas=el('canvas'),ctx=canvas.getContext('2d');
+const colors={healthy:'#21af8f',medium:'#f9ca3d',intense:'#ee3e58'};
+let file=null,maskFile=null,img=null,objectURL=null,points=[],conflictPoints=[],roi=null,roiMode=false,start=null,drag=null,exclusions=[],exclusionMode=false,exclusionStart=null,exclusionDrag=null,profiles=[],selectedProfile='',busy=false,maskBusy=false,last=null,stateVersion=0,zoom=1,baseCanvasWidth=1;
+function setZoom(next){if(!img)return;const view=el('photoViewport'),oldWidth=canvas.getBoundingClientRect().width||1,oldHeight=canvas.getBoundingClientRect().height||1;
+const centerX=(view.scrollLeft+view.clientWidth/2)/oldWidth,centerY=(view.scrollTop+view.clientHeight/2)/oldHeight;
+zoom=Math.max(1,Math.min(6,next));const renderScale=Math.min(1,1200*zoom/Math.max(img.naturalWidth,img.naturalHeight));
+canvas.width=Math.max(1,Math.round(img.naturalWidth*renderScale));canvas.height=Math.max(1,Math.round(img.naturalHeight*renderScale));
+canvas.style.width=Math.round(Math.min(baseCanvasWidth,view.clientWidth)*zoom)+'px';canvas.style.height='auto';paint();
+view.scrollLeft=centerX*canvas.getBoundingClientRect().width-view.clientWidth/2;view.scrollTop=centerY*canvas.getBoundingClientRect().height-view.clientHeight/2;
+el('zoomValue').textContent=Math.round(zoom*100)+'%';el('zoomOut').disabled=zoom<=1;el('zoomIn').disabled=zoom>=6}
+function invalidate(){stateVersion++;last=null;el('output').style.display='none';el('empty').hidden=false}
+function setExclusionMode(enabled){exclusionMode=enabled;exclusionStart=null;exclusionDrag=null;el('exclude').textContent=enabled?'Termina esclusioni':'Escludi isolatore';el('exclude').setAttribute('aria-pressed',String(enabled));paint()}
+function fail(e){el('error').textContent=e;el('error').style.display='block'}
+function clearError(){el('error').style.display='none';el('error').textContent=''}
+async function preparePhoto(source,picture){
+const width=picture.naturalWidth,height=picture.naturalHeight;
+if(width*height<=40000000&&source.size<=18*1024*1024)return {file:source,notice:''};
+let scale=Math.min(1,Math.sqrt(32000000/(width*height)),8000/Math.max(width,height));
+let quality=.88,blob=null,output=document.createElement('canvas');
+for(let attempt=0;attempt<6;attempt++){
+output.width=Math.max(1,Math.floor(width*scale));output.height=Math.max(1,Math.floor(height*scale));
+const context=output.getContext('2d');if(!context)throw Error('Memoria browser insufficiente per ridurre la fotografia');
+context.drawImage(picture,0,0,output.width,output.height);
+blob=await new Promise(resolve=>output.toBlob(resolve,'image/jpeg',quality));
+if(!blob)throw Error('Impossibile preparare la fotografia nel browser');
+if(blob.size<=18*1024*1024&&output.width*output.height<=40000000)break;
+scale*=.8;quality=Math.max(.7,quality-.04);
+}
+const processedWidth=output.width,processedHeight=output.height;
+output.width=0;output.height=0;
+if(!blob||blob.size>18*1024*1024)throw Error('La fotografia è troppo grande per la memoria disponibile: esporta una copia JPG più piccola');
+const name=source.name.replace(/\.[^.]+$/,'')+'-analisi-locale.jpg';
+return {file:new File([blob],name,{type:'image/jpeg'}),notice:'Originale '+width+' × '+height+' px · copia locale per analisi '+processedWidth+' × '+processedHeight+' px ('+Math.round(blob.size/1024/1024*10)/10+' MB). L’originale resta intatto.'};
+}
+async function generateMask(source,version=stateVersion){if(!source)return;maskFile=null;maskBusy=true;el('maskStatus').textContent='Rimozione sfondo in corso sul PC con BiRefNet CPU…';el('busy').textContent='BiRefNet sta elaborando localmente. La foto non viene inviata a servizi esterni.';el('busy').style.display='block';buttons();try{let body=new FormData();body.append('file',source);let response=await fetch('/api/foreground-mask',{method:'POST',body});if(!response.ok){let detail='Errore '+response.status;try{let j=await response.json();detail=j.detail||detail}catch{}throw Error(detail)}let blob=await response.blob();if(version!==stateVersion||source!==file)return;maskFile=new File([blob],source.name.replace(/\.[^.]+$/,'')+'-maschera.png',{type:'image/png'});el('maskStatus').textContent='Maschera generata automaticamente · '+Math.round(blob.size/1024)+' KB · locale';last=null;el('output').style.display='none';el('empty').hidden=false}catch(err){if(version===stateVersion){maskFile=null;el('maskStatus').textContent='Maschera non generata: '+err.message;fail('Rimozione sfondo non riuscita: '+err.message)}}finally{if(version===stateVersion){maskBusy=false;el('busy').style.display='none';buttons()}}}
+el('startOver').onclick=()=>{if(busy||maskBusy)return;invalidate();clearError();file=null;maskFile=null;img=null;points=[];conflictPoints=[];roi=null;roiMode=false;start=null;drag=null;exclusions=[];setExclusionMode(false);zoom=1;el('photo').value='';el('operatorNotes').value='';el('photoStatus').textContent='Nessuna fotografia caricata';el('maskStatus').textContent='Carica una foto: BiRefNet genererà la maschera in locale.';el('exclusionStatus').textContent='Trascina lungo un isolatore, dal primo all’ultimo disco. Le zone viola saranno escluse dal conteggio.';el('maskRetry').disabled=true;el('placeholder').hidden=false;canvas.hidden=true;el('roi').textContent='Seleziona ROI';el('note').textContent='Ambito: intera foto. I valori NON rappresentano l’intero sostegno.';if(objectURL)URL.revokeObjectURL(objectURL);objectURL=null;buttons()};
+function selectedProfileData(){return profiles.find(x=>x.profile_id===selectedProfile)}
+function buttons(){let chosen=selectedProfileData();el('calibrate').disabled=!file||!maskFile||busy||maskBusy||!el('profileName').value.trim();el('analyze').disabled=!file||!maskFile||busy||maskBusy||!chosen||!chosen.valid;el('addSamples').disabled=!file||!maskFile||busy||maskBusy||!chosen||!chosen.valid||selectedProfile==='legacy'||!points.length;el('calibrateDetail').disabled=!file||!maskFile||!roi||busy||maskBusy;el('reset').disabled=busy||maskBusy||!chosen||selectedProfile==='legacy';
+el('photo').disabled=busy||maskBusy;el('startOver').disabled=busy||maskBusy;el('maskRetry').disabled=!file||busy||maskBusy;el('resolution').disabled=busy||maskBusy;for(let id of ['profileName','profileSelect','featureMode','roi','full','undo','clear','exclude','undoExclusion','clearExclusions','exclusionDiameter'])el(id).disabled=busy||maskBusy||(!img&&id==='exclude');
+document.querySelectorAll('input[name=cls]').forEach(x=>x.disabled=busy);
+el('zoomOut').disabled=!img||zoom<=1;el('zoomFit').disabled=!img;el('zoomIn').disabled=!img||zoom>=6}
+function position(e){let r=canvas.getBoundingClientRect();return {x:Math.max(0,Math.min(.999999,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(.999999,(e.clientY-r.top)/r.height))}}
+function paint(){if(!img)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);
+let r=drag||roi;if(r){ctx.strokeStyle='#67d5ff';ctx.lineWidth=3;ctx.strokeRect(r[0]*canvas.width,r[1]*canvas.height,(r[2]-r[0])*canvas.width,(r[3]-r[1])*canvas.height)}
+for(let item of [...exclusions,...(exclusionDrag?[exclusionDrag]:[])]){ctx.beginPath();ctx.strokeStyle='rgba(182,83,245,.52)';ctx.lineCap='round';ctx.lineWidth=item.radius_px*2*canvas.width/img.naturalWidth;ctx.moveTo(item.start[0]*canvas.width,item.start[1]*canvas.height);ctx.lineTo(item.end[0]*canvas.width,item.end[1]*canvas.height);ctx.stroke();ctx.lineCap='butt'}
+for(let i=0;i<points.length;i++){let p=points[i],highlight=conflictPoints.includes(i+1),x=p.x*canvas.width,y=p.y*canvas.height;ctx.beginPath();ctx.fillStyle=colors[p.label];ctx.strokeStyle=highlight?'#fff200':'#fff';ctx.lineWidth=highlight?4:2;ctx.arc(x,y,highlight?11:7,0,Math.PI*2);ctx.fill();ctx.stroke();if(highlight){ctx.font='bold 13px Segoe UI,system-ui,sans-serif';ctx.lineWidth=3;ctx.strokeStyle='#07111d';ctx.strokeText('#'+(i+1),x+13,y-10);ctx.fillStyle='#fff200';ctx.fillText('#'+(i+1),x+13,y-10)}}}
+el('photo').addEventListener('change',e=>{let f=e.target.files?.[0];if(!f)return;e.target.value='';invalidate();clearError();file=null;maskFile=null;el('operatorNotes').value='';el('photoStatus').textContent='Caricamento: '+f.name;el('maskStatus').textContent='In attesa del caricamento della foto…';img=null;points=[];conflictPoints=[];roi=null;roiMode=false;start=null;drag=null;exclusions=[];setExclusionMode(false);el('exclusionStatus').textContent='Trascina lungo un isolatore, dal primo all’ultimo disco. Le zone viola saranno escluse dal conteggio.';canvas.hidden=true;el('placeholder').hidden=false;el('roi').textContent='Seleziona ROI';buttons();if(objectURL)URL.revokeObjectURL(objectURL);objectURL=null;
+objectURL=URL.createObjectURL(f);let loadURL=objectURL,loadVersion=stateVersion,picture=new Image();
+picture.onload=async()=>{if(loadVersion!==stateVersion){URL.revokeObjectURL(loadURL);return}try{
+let prepared=await preparePhoto(f,picture);if(loadVersion!==stateVersion){URL.revokeObjectURL(loadURL);return}
+let analysisPicture=picture;
+if(prepared.file!==f){let nextURL=URL.createObjectURL(prepared.file);objectURL=nextURL;analysisPicture=await new Promise((resolve,reject)=>{let p=new Image();p.onload=()=>resolve(p);p.onerror=()=>reject(Error('Impossibile aprire la copia locale'));p.src=nextURL});if(loadVersion!==stateVersion){URL.revokeObjectURL(nextURL);return}URL.revokeObjectURL(loadURL)}
+file=prepared.file;img=analysisPicture;points=[];conflictPoints=[];roi=null;roiMode=false;el('roi').textContent='Seleziona ROI';let factor=Math.min(1,1200/Math.max(img.naturalWidth,img.naturalHeight));
+baseCanvasWidth=Math.round(img.naturalWidth*factor);canvas.width=baseCanvasWidth;canvas.height=Math.round(img.naturalHeight*factor);canvas.hidden=false;el('placeholder').hidden=true;el('photoStatus').textContent='Fotografia caricata: '+f.name+' · '+(prepared.notice||img.naturalWidth+' × '+img.naturalHeight+' px');el('note').textContent='Ambito: intera foto';zoom=1;setZoom(1);el('photoViewport').scrollTo(0,0);buttons();generateMask(file,loadVersion)
+}catch(err){if(loadVersion!==stateVersion)return;URL.revokeObjectURL(loadURL);if(objectURL&&objectURL!==loadURL)URL.revokeObjectURL(objectURL);objectURL=null;file=null;img=null;canvas.hidden=true;el('placeholder').hidden=false;el('photoStatus').textContent='Nessuna fotografia caricata';buttons();fail(err.message)}};
+picture.onerror=()=>{URL.revokeObjectURL(loadURL);if(loadVersion!==stateVersion)return;objectURL=null;file=null;img=null;canvas.hidden=true;el('placeholder').hidden=false;el('photoStatus').textContent='Nessuna fotografia caricata';buttons();fail('Impossibile aprire la foto')};picture.src=loadURL});
+el('maskRetry').onclick=()=>{if(file&&!maskBusy){clearError();generateMask(file)}};
+canvas.addEventListener('pointerdown',e=>{if(!img||busy||maskBusy)return;let p=position(e);if(conflictPoints.length){let rect=canvas.getBoundingClientRect(),hit=-1,best=20;for(let id of conflictPoints){let q=points[id-1];if(!q)continue;let d=Math.hypot((q.x-p.x)*rect.width,(q.y-p.y)*rect.height);if(d<best){best=d;hit=id-1}}if(hit>=0){invalidate();points.splice(hit,1);conflictPoints=[];clearError();el('exclusionStatus').textContent='Marker rimosso. Puoi riprovare la calibrazione; gli altri punti sono rimasti.';paint();buttons();return}fail('Clicca direttamente uno dei marker evidenziati in giallo per rimuoverlo.');return}if(exclusionMode){let diameter=Number(el('exclusionDiameter').value);if(!Number.isFinite(diameter)||diameter<4||diameter>600){fail('Larghezza isolatore: 4–600 px');return}exclusionStart=p;exclusionDrag={start:[p.x,p.y],end:[p.x,p.y],radius_px:diameter/2};canvas.setPointerCapture(e.pointerId)}else if(roiMode){start=p;drag=[p.x,p.y,p.x,p.y];canvas.setPointerCapture(e.pointerId)}else if(points.length<160){invalidate();points.push({...p,label:document.querySelector('input[name=cls]:checked').value});buttons()}paint()});
+canvas.addEventListener('pointermove',e=>{if(exclusionStart){let p=position(e);exclusionDrag.end=[p.x,p.y];paint();return}if(!start)return;let p=position(e);drag=[Math.min(start.x,p.x),Math.min(start.y,p.y),Math.max(start.x,p.x),Math.max(start.y,p.y)];paint()});
+canvas.addEventListener('pointerup',e=>{if(exclusionStart){let p=position(e),a=exclusionStart,d=exclusionDrag;exclusionStart=null;exclusionDrag=null;if(Math.hypot((p.x-a.x)*img.naturalWidth,(p.y-a.y)*img.naturalHeight)>=8&&exclusions.length<80){d.end=[p.x,p.y];exclusions.push(d);invalidate();el('exclusionStatus').textContent=exclusions.length+' isolatori esclusi. Trascina lungo il successivo per aggiungerne altri; premi Termina esclusioni per tornare ai marker.'}else fail('Trascina per almeno 8 pixel lungo l’isolatore');paint();return}if(!start)return;let p=position(e);let r=[Math.min(start.x,p.x),Math.min(start.y,p.y),Math.max(start.x,p.x),Math.max(start.y,p.y)];start=null;drag=null;roiMode=false;el('roi').textContent='Seleziona ROI';
+if((r[2]-r[0])*img.naturalWidth>=42&&(r[3]-r[1])*img.naturalHeight>=42){roi=r;el('note').textContent='Ambito: ROI selezionata, non intero sostegno'}else fail('ROI troppo piccola');paint();buttons()});
+el('roi').onclick=()=>{if(!img)return;invalidate();setExclusionMode(false);roiMode=!roiMode;el('roi').textContent=roiMode?'Trascina sulla foto':'Seleziona ROI'};
+el('exclude').onclick=()=>{if(!img)return;roiMode=false;start=null;drag=null;el('roi').textContent='Seleziona ROI';setExclusionMode(!exclusionMode)};
+el('undoExclusion').onclick=()=>{if(!exclusions.length)return;exclusions.pop();invalidate();el('exclusionStatus').textContent=exclusions.length+' isolatori esclusi';paint()};
+el('clearExclusions').onclick=()=>{if(!exclusions.length)return;exclusions=[];invalidate();el('exclusionStatus').textContent='Nessun isolatore escluso';paint()};
+el('exclusionDiameter').addEventListener('change',()=>{if(exclusionMode)paint()});
+el('full').onclick=()=>{invalidate();roi=null;roiMode=false;drag=null;start=null;el('note').textContent='Ambito: intera foto';paint();buttons()};
+el('resolution').addEventListener('change',invalidate);
+el('zoomOut').onclick=()=>setZoom(zoom-.5);el('zoomFit').onclick=()=>setZoom(1);el('zoomIn').onclick=()=>setZoom(zoom+.5);
+el('photoViewport').addEventListener('wheel',e=>{if(!e.ctrlKey||!img)return;e.preventDefault();setZoom(zoom+(e.deltaY<0?.5:-.5))},{passive:false});
+window.addEventListener('resize',()=>{if(img)setZoom(zoom)});
+el('undo').onclick=()=>{invalidate();conflictPoints=[];points.pop();paint();buttons()};el('clear').onclick=()=>{invalidate();conflictPoints=[];points=[];paint();buttons()};
+document.querySelectorAll('input[name=cls]').forEach(x=>x.addEventListener('change',invalidate));
+async function status(){try{let [r,pr]=await Promise.all([fetch('/api/status'),fetch('/api/profiles')]);if(!r.ok||!pr.ok)throw Error();let s=await r.json(),catalog=await pr.json();profiles=catalog.profiles;let select=el('profileSelect'),previous=selectedProfile;select.replaceChildren();for(let p of profiles){let o=document.createElement('option');o.value=p.profile_id;o.textContent=(p.valid?'':'⚠ ')+p.name+' · '+Object.values(p.sample_counts||{}).reduce((a,b)=>a+b,0)+' esempi · '+(p.extraction?.mode==='tiles_v1'?'dettaglio':'rapido')+(p.source_images?' · '+p.source_images+' foto':'');select.append(o)}if(profiles.some(p=>p.profile_id===previous))selectedProfile=previous;else selectedProfile=(profiles.find(p=>p.valid)||profiles[0])?.profile_id||'';select.value=selectedProfile;el('status').textContent=s.loaded?'DINOv2-small · CPU / caricato':'DINOv2-small · CPU / pronto';let chosen=selectedProfileData();el('profile').textContent=chosen?(chosen.valid?'Profilo selezionato: '+chosen.name:'Profilo incompatibile: '+chosen.name):'Nessun profilo salvato';buttons()}catch(e){el('status').textContent='Server non raggiungibile'}}
+function show(o){last=o;el('empty').hidden=true;el('output').style.display='block';let r=o.report;
+el('rust').textContent=r.corrosion_pct_of_visible_metal===null?'n/d':r.corrosion_pct_of_visible_metal.toFixed(1)+'%';
+el('intensity').textContent=r.relative_visual_intensity_1_to_2===null?'n/d':r.relative_visual_intensity_1_to_2.toFixed(2)+'/2';
+el('metal').textContent=r.visible_metal_pct_of_roi.toFixed(1)+'%';el('uncertain').textContent=r.class_pct_of_visible_metal.uncertain==null?'n/d':r.class_pct_of_visible_metal.uncertain.toFixed(1)+'%';
+for(let k of ['medium','intense'])el(k).textContent=!r.profile_sample_counts[k]?'Non calibrata':r.class_pct_of_visible_metal[k]===null?'n/d':r.class_pct_of_visible_metal[k].toFixed(1)+'%';
+el('quality').textContent=(r.quality_warnings||[]).join(' ');el('showAmbiguity').checked=false;
+el('overlay').src='data:image/png;base64,'+o.overlay_base64;el('timing').textContent='Modello reale: '+r.model+' · '+r.inference_seconds+' s su CPU · '+(r.parameters.tile_count||1)+' riquadri · '+r.parameters.feature_grid_dimensions.join(' × ')+' patch · Maschera sfondo: '+(r.foreground_mask?.used?'applicata':'non usata')+(r.profile_persisted?' · Profilo salvato':' · Profilo temporaneo, non salvato')}
+async function run(endpoint,saveProfile=true){if(busy||!file)return;clearError();if(endpoint==='calibrate'){let n=k=>points.filter(p=>p.label===k).length;if(!maskFile){fail('Maschera sfondo necessaria: attendere BiRefNet o premere Riprova maschera');return}if(!n('healthy')||!(n('medium')||n('intense'))){fail('Servono marker per metallo sano e almeno una classe di ruggine realmente visibile');return}if(saveProfile&&!el('profileName').value.trim()){fail('Assegna un nome al nuovo profilo');return}}if(endpoint==='analyze'&&!selectedProfile){fail('Seleziona un profilo');return}if(endpoint==='addSamples'&&!points.length){fail('Marca almeno un campione nella nuova fotografia');return}
+const version=stateVersion,requestFile=file,requestMaskFile=maskFile,requestRoi=JSON.stringify(roi||[0,0,1,1]),requestExclusions=JSON.stringify(exclusions),requestResolution=el('resolution').value;
+busy=true;buttons();el('busy').textContent='Elaborazione su CPU: maschera del metallo a risoluzione nativa (2–3 minuti la prima volta per ogni foto/ROI, poi riusata), DINOv2 e classificazione del colore.';el('busy').style.display='block';let form=new FormData();form.append('file',requestFile);form.append('resolution',requestResolution);form.append('roi',requestRoi);if(endpoint==='calibrate'||endpoint==='addSamples'){form.append('seeds',JSON.stringify(points))}if(endpoint==='calibrate'){form.append('save_profile',String(saveProfile));form.append('profile_name',saveProfile?el('profileName').value.trim():'')};if(endpoint==='analyze')form.append('profile_id',selectedProfile);
+form.append('feature_mode',el('featureMode').value);if(requestMaskFile)form.append('foreground_mask',requestMaskFile);form.append('exclusions',requestExclusions);form.append('operator_notes',el('operatorNotes').value.trim());form.append('cluster_anomalies',el('clusterAnomalies').checked?'true':'false');
+let url=endpoint==='addSamples'?'/api/profiles/'+encodeURIComponent(selectedProfile)+'/samples':'/api/'+endpoint;try{let res=await fetch(url,{method:'POST',body:form});let o=await res.json();if(!res.ok)throw Error(typeof o.detail==='string'?o.detail:'Errore '+res.status);if(version!==stateVersion||requestFile!==file||requestMaskFile!==maskFile||requestRoi!==JSON.stringify(roi||[0,0,1,1])||requestExclusions!==JSON.stringify(exclusions)||requestResolution!==el('resolution').value)return;if(endpoint==='calibrate'&&saveProfile)selectedProfile=o.report.profile_id;show(o);await status()}
+catch(e){if(version===stateVersion){let ids=[...e.message.matchAll(/marker #(\d+)/g)].map(m=>Number(m[1]));conflictPoints=[...new Set(ids)].filter(i=>i>=1&&i<=points.length);if(conflictPoints.length){let p=points[conflictPoints[0]-1],view=el('photoViewport'),rect=canvas.getBoundingClientRect();view.scrollLeft=Math.max(0,p.x*rect.width-view.clientWidth/2);view.scrollTop=Math.max(0,p.y*rect.height-view.clientHeight/2);paint()}fail('Analisi non riuscita: '+e.message)}}
+finally{busy=false;el('busy').style.display='none';buttons()}}
+el('calibrate').onclick=()=>run('calibrate');el('analyze').onclick=()=>run('analyze');el('addSamples').onclick=()=>run('addSamples');el('calibrateDetail').onclick=()=>run('calibrate',false);
+el('profileName').addEventListener('input',buttons);el('featureMode').addEventListener('change',invalidate);el('profileSelect').addEventListener('change',()=>{selectedProfile=el('profileSelect').value;invalidate();buttons()});
+for(let id of ['operatorNotes'])el(id).addEventListener('input',invalidate);el('clusterAnomalies').addEventListener('change',invalidate);
+el('showAmbiguity').onchange=()=>{if(last)el('overlay').src='data:image/png;base64,'+(el('showAmbiguity').checked?last.ambiguity_mask_base64:last.overlay_base64)};
+el('reset').onclick=async()=>{let chosen=selectedProfileData();if(!chosen||!confirm('Eliminare il profilo "'+chosen.name+'"?'))return;try{let r=await fetch('/api/profiles/'+encodeURIComponent(selectedProfile),{method:'DELETE'});if(!r.ok)throw Error();selectedProfile='';await status()}catch(e){fail('Errore eliminazione profilo')}};
+function save(url,name){let a=document.createElement('a');a.href=url;a.download=name;a.click()}
+function pdfName(){return (file?.name||'report').replace(/\.[^./\\]+$/,'')+'_AIRVisionCheck.pdf'}
+function resultName(kind){return 'dinov2-'+kind+'-'+(last?.report.result_id||'')}
+el('pdf').onclick=()=>{if(!last||!last.report_pdf_base64)return;let bytes=Uint8Array.from(atob(last.report_pdf_base64),c=>c.charCodeAt(0));let u=URL.createObjectURL(new Blob([bytes],{type:'application/pdf'}));save(u,pdfName());setTimeout(()=>URL.revokeObjectURL(u),1200)};
+el('png').onclick=()=>{if(last)save('data:image/png;base64,'+last.overlay_base64,resultName('overlay')+'.png')};
+el('mask').onclick=()=>{if(last)save('data:image/png;base64,'+last.class_mask_base64,resultName('mask')+'.png')};
+el('json').onclick=()=>{if(!last)return;let u=URL.createObjectURL(new Blob([JSON.stringify(last.report,null,2)],{type:'application/json'}));save(u,resultName('report')+'.json');setTimeout(()=>URL.revokeObjectURL(u),1200)};
+el('csv').onclick=()=>{if(!last)return;let u=URL.createObjectURL(new Blob([last.report_csv],{type:'text/csv;charset=utf-8'}));save(u,resultName('report')+'.csv');setTimeout(()=>URL.revokeObjectURL(u),1200)};
+status()})();
+</script></body></html>
+
