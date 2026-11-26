@@ -2,7 +2,7 @@
 exclude objects from the analysis or analyse only them. Research demo, not a structural assessment."""
 import os, io, json, base64, threading, time, hashlib, uuid
 import csv, asyncio
-import subprocess, tempfile
+import subprocess, tempfile, shutil
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
@@ -20,7 +20,8 @@ import object_detection as od
 ROOT=Path(__file__).resolve().parent
 MODEL_ID="facebook/dinov2-small"
 LABELS=("background","healthy","medium","intense")
-OBJECT_EXCLUDED_RGBA=(84,126,255,120)
+OBJECT_EXCLUDED_RGBA=(84,126,255,120)      # excluded by a YOLO model (automatic)
+MANUAL_EXCLUDED_RGBA=(40,190,255,135)      # excluded by hand (drawn by the operator): same blue family, lighter/cyan
 OUTSIDE_FOCUS_RGBA=(5,10,18,150)
 COLORS={"healthy":(33,175,143,75),"medium":(249,202,61,155),"intense":(238,62,88,165),"uncertain":(220,225,235,135)}
 PROFILE=ROOT/"local_profile.json"
@@ -31,7 +32,23 @@ MODEL=None
 PROCESSOR=None
 CHECKPOINT_REVISION=None
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY","1")
-app=FastAPI(title="DINOv2 Corrosion CPU v2",docs_url=None,redoc_url=None)
+app=FastAPI(title="Rustron / Corrosion Intelligence",docs_url=None,redoc_url=None)
+
+@app.exception_handler(Exception)
+async def unexpected_error(request,exc):
+    """Unexpected errors: full traceback to errori_server.log, a readable JSON message to the page
+    (instead of a plain 'Internal Server Error' the page cannot show)."""
+    import traceback
+    from fastapi.responses import JSONResponse
+    text=f"{type(exc).__name__}: {exc}"
+    if isinstance(exc,MemoryError) or "bad alloc" in text.lower() or "not enough memory" in text.lower():
+        hint="memoria RAM esaurita (altri programmi pesanti aperti?): chiudi o metti in pausa qualcosa e riprova"
+    else:hint="errore interno"
+    try:
+        with open(ROOT/"errori_server.log","a",encoding="utf-8") as log:
+            log.write(f"\n=== {datetime.now().isoformat(timespec='seconds')} {request.method} {request.url.path}\n{traceback.format_exc()}")
+    except OSError:pass
+    return JSONResponse(status_code=500,content={"detail":f"{hint} · {text[:300]} · dettagli in errori_server.log nella cartella della v2"})
 
 def make_foreground_mask(img):
     """Run the project's isolated BiRefNet CPU environment on an in-memory photo."""
@@ -48,6 +65,7 @@ def make_foreground_mask(img):
             env["HF_HOME"]=str(ROOT/"model_cache")
             env["U2NET_HOME"]=str(ROOT/"model_cache"/"rembg")
             env["V2_SERVER_PID"]=str(os.getpid())  # the worker exits if this server stops
+            env.pop("OMP_NUM_THREADS",None)  # ultralytics sets it to 1 on import: BiRefNet would run on a single core
             run=subprocess.run([str(python),str(worker),str(source),str(target)],
                                cwd=ROOT,capture_output=True,text=True,timeout=240,env=env,
                                creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
@@ -62,40 +80,142 @@ def make_foreground_mask(img):
 
 FINE_MASK_DIR=ROOT/"model_cache"/"fine_masks"
 FINE_MASK_LOCK=threading.Lock()
+FINE_MASK_TIMEOUT=int(os.getenv("V2_FINE_MASK_TIMEOUT","5400"))  # seconds; the CPU is often shared with training jobs
 
-def make_fine_mask(img,box,source_sha256):
+FINE_STATE={"key":None,"proc":None,"background":False,"done":0,"total":0,"computed":0,"skipped":0,"state":"idle","note":None}
+FINE_STATE_LOCK=threading.Lock()
+PREPARE_WANTED={"key":None}
+
+def needed_mask(objects,box):
+    """ROI pixels whose metal mask the analysis will actually use: inside the 'Analizza solo qui'
+    objects (the whole ROI when there are none) and outside excluded objects. None = whole ROI."""
+    if objects is None:return None
+    instance,rules,_=objects
+    exclude,focus,_=od.object_masks(instance,rules,box,(box[2]-box[0],box[3]-box[1]))
+    need=(focus if focus is not None else np.ones(exclude.shape,bool))&~exclude
+    return None if need.all() else need
+
+def fine_keys(source_sha256,box,need):
+    """(final mask key, tiles key). Tiles depend only on photo + ROI, so they are shared by every
+    variant of objects/modes; the final mask also depends on which tiles were skipped."""
+    base=hashlib.sha256(f"{source_sha256}:{list(box)}:tiles_v1".encode()).hexdigest()[:32]
+    if need is None:return base,base
+    h=hashlib.sha256(np.packbits(need).tobytes()+str(need.shape).encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{base}:{h}".encode()).hexdigest()[:32],base
+
+def _kill_tree(pid):
+    subprocess.call(["taskkill","/PID",str(pid),"/T","/F"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+
+def stop_background_mask(except_key=None):
+    """Stop a precomputation started for a ROI/objects no longer current (its finished tiles stay on disk)."""
+    with FINE_STATE_LOCK:
+        proc=FINE_STATE["proc"]
+        if proc and FINE_STATE["background"] and FINE_STATE["key"]!=except_key and proc.poll() is None:
+            FINE_STATE["state"]="stopped";_kill_tree(proc.pid)
+
+def make_fine_mask(img,box,source_sha256,need=None,background=False):
     """Sharp metal mask for the ROI: BiRefNet on native-resolution tiles, cached on disk.
-
-    Returns (bool array at ROI pixel size, None) or (None, reason) when it cannot be
-    produced; the caller then falls back to the coarse whole-photo mask and says so.
-    """
+    need: bool ROI-size array of the pixels the analysis uses; tiles with none of them are skipped.
+    Returns (bool array at ROI pixel size, None) or (None, reason)."""
+    import re
     worker=ROOT/"segmenta_riquadri.py"
     python=ROOT/"model_cache"/"seg_env"/"Scripts"/"python.exe"
     if not worker.is_file() or not python.is_file():return None,"ambiente BiRefNet locale non installato"
-    key=hashlib.sha256(f"{source_sha256}:{list(box)}:tiles_v1".encode()).hexdigest()[:32]
-    target=FINE_MASK_DIR/(key+".png")
+    key,tiles_key=fine_keys(source_sha256,box,need)
+    target=FINE_MASK_DIR/(key+".png");tiles=FINE_MASK_DIR/(tiles_key+"_riquadri")
     size=(box[2]-box[0],box[3]-box[1])
+    if not background:stop_background_mask(except_key=key)
     with FINE_MASK_LOCK:
         try:
             if not target.is_file():
+                if background and PREPARE_WANTED["key"]!=key:return None,"superata da una ROI più recente"
                 FINE_MASK_DIR.mkdir(parents=True,exist_ok=True)
                 with tempfile.TemporaryDirectory(prefix="dinov2-fine-") as temp:
-                    source=Path(temp)/"photo.png";partial=Path(temp)/"mask.png"
+                    source=Path(temp)/"photo.png";partial=Path(temp)/"mask.png";need_png=Path(temp)/"need.png"
                     img.save(source,format="PNG")
+                    args=[str(python),str(worker),str(source),*map(str,box),str(partial)]
+                    if need is not None:
+                        Image.fromarray(need.astype(np.uint8)*255,"L").save(need_png,format="PNG");args.append(str(need_png))
                     env=os.environ.copy()
                     env["HF_HOME"]=str(ROOT/"model_cache");env["U2NET_HOME"]=str(ROOT/"model_cache"/"rembg")
                     env["V2_SERVER_PID"]=str(os.getpid())  # the worker exits if this server stops
-                    run=subprocess.run([str(python),str(worker),str(source),*map(str,box),str(partial)],
-                                       cwd=ROOT,capture_output=True,text=True,timeout=1200,env=env,
-                                       creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
-                    if run.returncode!=0 or not partial.is_file():
-                        return None,"BiRefNet a riquadri fallito: "+(run.stderr or run.stdout or "senza dettagli")[-300:]
+                    env.pop("OMP_NUM_THREADS",None)  # ultralytics sets it to 1 on import: BiRefNet would run on a single core
+                    env["V2_TILE_CACHE"]=str(tiles)  # finished tiles survive a timeout, a restart or a ROI change
+                    proc=subprocess.Popen(args,cwd=ROOT,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=env,
+                                          creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+                    with FINE_STATE_LOCK:
+                        FINE_STATE.update(key=key,proc=proc,background=background,done=0,total=0,computed=0,skipped=0,state="running",note=None)
+                    lines=[]
+                    def read():
+                        for line in proc.stdout:
+                            lines.append(line)
+                            m=re.match(r"tile (\d+)/(\d+)( skipped)?",line)
+                            if m:
+                                with FINE_STATE_LOCK:
+                                    if FINE_STATE["proc"] is proc:
+                                        FINE_STATE["done"]=int(m.group(1));FINE_STATE["total"]=int(m.group(2))
+                                        FINE_STATE["skipped" if m.group(3) else "computed"]+=1
+                    reader=threading.Thread(target=read,daemon=True);reader.start()
+                    deadline=time.time()+FINE_MASK_TIMEOUT
+                    while proc.poll() is None:
+                        if time.time()>deadline:
+                            _kill_tree(proc.pid);proc.wait()
+                            with FINE_STATE_LOCK:FINE_STATE.update(state="error",note="tempo scaduto",proc=None)
+                            return None,f"BiRefNet a riquadri oltre il limite di {FINE_MASK_TIMEOUT//60} minuti (CPU occupata da altri programmi?). I riquadri già calcolati sono salvati: ripetendo l'analisi si riparte da lì"
+                        time.sleep(0.5)
+                    reader.join(5)
+                    if proc.returncode!=0 or not partial.is_file():
+                        with FINE_STATE_LOCK:
+                            stopped=FINE_STATE["state"]=="stopped"
+                            FINE_STATE.update(state="stopped" if stopped else "error",proc=None,note=None if stopped else "".join(lines)[-300:])
+                        if stopped:return None,"interrotta: ROI o oggetti cambiati (riquadri salvati)"
+                        return None,"BiRefNet a riquadri fallito: "+("".join(lines) or "senza dettagli")[-300:]
                     target.write_bytes(partial.read_bytes())
+                    with FINE_STATE_LOCK:FINE_STATE.update(state="done",proc=None)
+            elif FINE_STATE["key"]!=key:
+                with FINE_STATE_LOCK:FINE_STATE.update(key=key,proc=None,background=background,state="done",done=0,total=0,computed=0,skipped=0)
             with Image.open(target) as saved:
                 if saved.size!=size:return None,"maschera di dettaglio in cache con dimensioni inattese"
                 return np.asarray(saved.convert("L"))>=128,None
-        except subprocess.TimeoutExpired:return None,"BiRefNet a riquadri oltre il limite di 20 minuti"
         except OSError as exc:return None,f"maschera di dettaglio non disponibile ({exc})"
+
+def _clean_old_tiles(days=3):
+    """Tile folders are kept for reuse; drop the ones not touched for a few days."""
+    try:
+        for d in FINE_MASK_DIR.glob("*_riquadri"):
+            if time.time()-d.stat().st_mtime>days*86400:shutil.rmtree(d,ignore_errors=True)
+    except OSError:pass
+_clean_old_tiles()
+
+@app.post("/api/prepare-mask")
+async def prepare_mask(file:UploadFile=File(...),roi:str=Form(...),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}")):
+    """Start the ROI metal mask in the background as soon as ROI and objects are known, so it is
+    ready (or nearly) when the operator presses Analizza. Same key the analysis will look for."""
+    img,source_sha256=await image_from_upload(file);box=region(img,roi)
+    objects=await objects_from_upload(object_mask,object_rules,object_info,img)
+    need=needed_mask(objects,box)
+    key,_=fine_keys(source_sha256,box,need)
+    if (FINE_MASK_DIR/(key+".png")).is_file():
+        img.close();return {"key":key,"state":"done"}
+    PREPARE_WANTED["key"]=key
+    with FINE_STATE_LOCK:same=FINE_STATE["key"]==key and FINE_STATE["state"]=="running"
+    if same:img.close()
+    else:
+        stop_background_mask(except_key=key)
+        def job():
+            try:make_fine_mask(img,box,source_sha256,need,background=True)
+            finally:img.close()
+        threading.Thread(target=job,daemon=True).start()
+    return {"key":key,"state":"running"}
+
+@app.get("/api/fine-mask-status")
+def fine_mask_status(key:str=""):
+    with FINE_STATE_LOCK:
+        st={k:FINE_STATE[k] for k in ("key","background","done","total","computed","skipped","state","note")}
+    if key and st["key"]!=key:
+        st={"key":key,"state":"done" if (FINE_MASK_DIR/(key+".png")).is_file() else "waiting","done":0,"total":0,"computed":0,"skipped":0,"background":True,"note":None}
+    return st
 
 @app.post("/api/foreground-mask")
 async def foreground_mask_endpoint(file:UploadFile=File(...)):
@@ -451,6 +571,7 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
     elif foreground_mask is not None:
         support=np.asarray(foreground_mask.crop(geo["box"]).resize((w,h),Image.Resampling.BILINEAR))>=128
     excluded=excluded_pixels(exclusions or [],geo,w,h)
+    manual_excluded=excluded.copy()  # drawn by the operator, kept apart for the map colour
     excluded_foreground=int((excluded & support).sum()) if support is not None else int(excluded.sum())
     object_report=None;object_excluded=object_focus=None
     if objects is not None:
@@ -530,6 +651,7 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
         if k in COLORS:overlay[pred==stable_ids[k]]=COLORS[k]
     if object_focus is not None:overlay[~object_focus]=OUTSIDE_FOCUS_RGBA
     if object_excluded is not None:overlay[object_excluded]=OBJECT_EXCLUDED_RGBA
+    if manual_excluded.any():overlay[manual_excluded]=MANUAL_EXCLUDED_RGBA
     blend=Image.alpha_composite(crop.resize((w,h)).convert("RGBA"),Image.fromarray(overlay,"RGBA"))
     b=io.BytesIO();blend.convert("RGB").save(b,format="PNG")
     # Indexed PNG: pixel values remain stable class IDs, while viewers show colors.
@@ -565,7 +687,7 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
                          "threshold_alpha_0_to_255":128 if support is not None else None,
                          "foreground_pixels_in_roi":int(support.sum()) if support is not None else None,
                          "foreground_pct_of_roi":round(100*float(support.mean()),2) if support is not None else None},
-      "insulator_exclusions":{"geometry":"oriented_capsule","regions":exclusions or [],
+      "insulator_exclusions":{"geometry":"oriented_capsule","regions":exclusions or [],"map_rgba":list(MANUAL_EXCLUDED_RGBA),"pixels_in_analysis_grid":int(manual_excluded.sum()),
                                "excluded_foreground_pixels_in_roi":excluded_foreground},
       "parameters":{"resolution":int(geo["side"]),"roi_original_pixels":list(geo["box"]),
                      "feature_mode":geo.get("feature_mode","standard"),"tile_count":geo.get("tile_count",1),
@@ -711,7 +833,11 @@ async def analyze(file:UploadFile=File(...),roi:str=Form("[0,0,1,1]"),resolution
     vec,crop,geo,sec=await asyncio.to_thread(embeddings,img,box,cfg["resolution"],cfg["mode"])
     # v2: the precise metal mask is computed on the ROI only (cached per photo + ROI); the
     # whole-photo mask is optional and no longer produced when the photo is loaded.
-    metal,note=await asyncio.to_thread(make_fine_mask,img,box,source_sha256)
+    metal,note=await asyncio.to_thread(make_fine_mask,img,box,source_sha256,needed_mask(objects,box))
+    if metal is None and support is None:
+        # Without any metal mask every ROI pixel (ground, roads, roofs) would be counted as metal:
+        # the rust figure would be meaningless, so no result is better than a wrong one.
+        raise HTTPException(503,"Analisi non eseguita: la maschera del metallo nella ROI non è stata calcolata ("+str(note)+"). Senza maschera anche strade e terreno verrebbero contati come metallo e la percentuale di ruggine sarebbe sbagliata. Ripeti l'analisi: i riquadri già calcolati sono salvati e non si rifanno.")
     return classify(vec,crop,geo,p,sec,source_sha256,support,support_sha256,parse_exclusions(exclusions),metal=metal,metal_note=note,photo_name=file.filename or "",operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,shot_meta=img.info.get("shot_meta"),objects=objects)
 
 @app.post("/api/profiles/{profile_id}/samples")

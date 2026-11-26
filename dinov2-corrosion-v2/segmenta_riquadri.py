@@ -5,6 +5,7 @@ member a few pixels wide disappears into a blob that also covers the ground seen
 through the lattice. Running the same model on ROI tiles keeps the members sharp.
 Runs in the isolated CPU-only rembg environment, one model load for all tiles.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -56,24 +57,65 @@ def plan(width, height):
 
 
 def main() -> int:
-    if len(sys.argv) != 7:
-        raise SystemExit("Uso: segmenta_riquadri.py FOTO X0 Y0 X1 Y1 MASCHERA_ROI_PNG")
+    if len(sys.argv) not in (7, 8):
+        raise SystemExit("Uso: segmenta_riquadri.py FOTO X0 Y0 X1 Y1 MASCHERA_ROI_PNG [PIXEL_UTILI_PNG]")
     source, target = Path(sys.argv[1]), Path(sys.argv[6])
     box = tuple(int(v) for v in sys.argv[2:6])
-    session = new_session("birefnet-general", providers=["CPUExecutionProvider"])
+    # Optional ROI-size mask of the pixels the analysis will use (inside "Analizza solo qui", outside
+    # excluded objects). Tiles without any of them are not computed: their result would be discarded.
+    need = None
+    if len(sys.argv) == 8:
+        with Image.open(sys.argv[7]) as m:
+            need = np.asarray(m.convert("L")) >= 128
+    # No CPU memory arena: it kept ~13 GB reserved on 1024 px tiles and failed with "bad allocation"
+    # when other jobs (training, Maskatron) used the RAM.
+    import onnxruntime as ort
+    opts = ort.SessionOptions()
+    opts.enable_cpu_mem_arena = False
+    opts.enable_mem_pattern = False
+    session = new_session("birefnet-general", sess_opts=opts, providers=["CPUExecutionProvider"])
     with Image.open(source) as original:
         crop = original.convert("RGB").crop(box)
     width, height = crop.size
     side, xs, ys = plan(width, height)
     total = np.zeros((height, width), np.float32)
     weight = np.zeros((height, width), np.float32)
+    # Finished tiles are kept on disk (V2_TILE_CACHE) so an interrupted run resumes instead of starting over.
+    cache = Path(os.environ["V2_TILE_CACHE"]) if os.environ.get("V2_TILE_CACHE") else None
+    if cache:
+        cache.mkdir(parents=True, exist_ok=True)
+    if need is not None and need.shape != (height, width):
+        raise SystemExit("La maschera dei pixel utili non ha le dimensioni della ROI")
+    margin = 32  # px: a needed pixel just outside a tile still keeps that tile
+    done = skipped = 0
     for y in ys:
         for x in xs:
+            if need is not None and not need[max(0, y - margin):y + side + margin, max(0, x - margin):x + side + margin].any():
+                done += 1; skipped += 1
+                print(f"tile {done}/{len(xs) * len(ys)} skipped", flush=True)
+                continue
             tile = crop.crop((x, y, min(width, x + side), min(height, y + side)))
-            cutout = remove(tile, session=session)
-            alpha = np.asarray(cutout.convert("RGBA").getchannel("A"), np.float32)
-            if alpha.shape != (tile.height, tile.width):
-                raise RuntimeError("BiRefNet non ha restituito un riquadro con dimensioni corrette")
+            saved = cache / f"tile_{side}_{x}_{y}.png" if cache else None
+            alpha = None
+            if saved and saved.is_file():
+                try:
+                    with Image.open(saved) as old:
+                        alpha = np.asarray(old.convert("L"), np.float32)
+                    if alpha.shape != (tile.height, tile.width):
+                        alpha = None
+                except OSError:
+                    alpha = None
+            if alpha is None:
+                cutout = remove(tile, session=session)
+                alpha = np.asarray(cutout.convert("RGBA").getchannel("A"), np.float32)
+                if alpha.shape != (tile.height, tile.width):
+                    raise RuntimeError("BiRefNet non ha restituito un riquadro con dimensioni corrette")
+                if saved:
+                    part = saved.with_suffix(".part")
+                    Image.fromarray(alpha.astype(np.uint8), "L").save(part, format="PNG")
+                    os.replace(part, saved)
+            done += 1
+            print(f"tile {done}/{len(xs) * len(ys)}", flush=True)
             # Trust the tile centre more than its borders, where context is missing.
             ry = np.minimum(np.arange(tile.height) + 1, np.arange(tile.height, 0, -1))
             rx = np.minimum(np.arange(tile.width) + 1, np.arange(tile.width, 0, -1))
@@ -82,7 +124,7 @@ def main() -> int:
             weight[y:y + tile.height, x:x + tile.width] += w
     mask = np.clip(total / np.maximum(weight, 1e-6), 0, 255).astype(np.uint8)
     Image.fromarray(mask, "L").save(target, format="PNG", optimize=True)
-    print(f"tiles={len(xs) * len(ys)} side={side}")
+    print(f"tiles={len(xs) * len(ys)} skipped={skipped} side={side}")
     return 0
 
 

@@ -66,7 +66,7 @@ def header(c, title, subtitle):
     c.roundRect(L, T(110), W, 65, 6, fill=1, stroke=0)
     c.setFillColor(BLUE)
     c.rect(L, T(110), 4, 65, fill=1, stroke=0)
-    line(c, "EAGLE PROJECTS • ISPEZIONI", L + 18, T(66), 300, 8, True, CYAN)
+    line(c, "EAGLE PROJECTS • RUSTRON / CORROSION INTELLIGENCE", L + 18, T(66), 330, 8, True, CYAN)
     line(c, title, L + 18, T(85), 330, 19, True, WHITE)
     line(c, subtitle, L + 18, T(99), 330, 9, False, LIGHT)
     pill_w = 142
@@ -83,7 +83,7 @@ def footer(c, page_label=""):
     """Rule, AI pill, optional page label and company name (top 782-812)."""
     c.setStrokeColor(RULE)
     c.line(L, T(782), R, T(782))
-    pill_text = "Analisi AI Visivo da modelli interni."
+    pill_text = "Rustron / Corrosion Intelligence · Analisi AI visiva da modelli interni."
     footer_w = c.stringWidth(pill_text, "Helvetica-Bold", 8) + 30
     c.setFillColor(GREEN_BG)
     c.setStrokeColor(GREEN_LINE)
@@ -197,7 +197,7 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
     from the photo metadata (report["shot_captured_at"], report["shot_coordinates"])."""
     out = io.BytesIO()
     c = canvas.Canvas(out, pagesize=A4)
-    c.setTitle("Ispezione visiva - corrosione")
+    c.setTitle("Rustron / Corrosion Intelligence - ispezione corrosione")
     c.setAuthor("Eagle Projects")
     header(c, "Analisi visiva della corrosione", "Sostegni metallici AT / AAT")
 
@@ -224,13 +224,29 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
     box_w = (W - gap) / 2
     panels = ((roi_image, "FOTOGRAFIA / AREA ANALIZZATA"),
               (classified_image, "MAPPA DI CLASSIFICAZIONE"))
+    # Legend of the excluded zones (automatic = model, manual = drawn by the operator), only when present.
+    auto_px = (report.get("object_recognition") or {}).get("excluded_pixels_in_roi") or 0
+    manual = report.get("insulator_exclusions") or {}
+    manual_n = len(manual.get("regions") or [])
+    legend = []
+    if auto_px:
+        legend.append((HexColor("#547EFF"), "Esclusi dal modello (YOLO)"))
+    if manual_n:
+        legend.append((HexColor("#28BEFF"), f"Esclusi a mano ({manual_n})"))
     for index, (image, title) in enumerate(panels):
         x = L + index * (box_w + gap)
         c.setFillColor(PALE)
         c.roundRect(x, T(panel_top + panel_h), box_w, panel_h, 6, fill=1, stroke=0)
         line(c, title, x + 9, T(panel_top + 15), box_w - 18, 7.5, True, NAVY)
         area_top = panel_top + head_h + 6
-        area_h = panel_h - head_h - 12
+        area_h = panel_h - head_h - 12 - (14 if legend and index == 1 else 0)
+        if legend and index == 1:
+            lx = x + 9
+            for color, text in legend:
+                c.setFillColor(color)
+                c.rect(lx, T(panel_top + panel_h - 9), 8, 8, fill=1, stroke=0)
+                line(c, text, lx + 11, T(panel_top + panel_h - 7.5), 120, 6.8, False, INK)
+                lx += 11 + c.stringWidth(text, "Helvetica", 6.8) + 10
         iw, ih = image.size
         scale = min((box_w - 16) / iw, area_h / ih)
         dw, dh = iw * scale, ih * scale
@@ -267,6 +283,8 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
         words = {"exclude": "esclusi", "focus": "solo"}
         parts = [f'{words[o["mode"]]} {o["count_in_roi"]} {o["class_name"]}' for o in objects if o["mode"] in words]
         scope_value = "metallo visibile · " + ", ".join(parts[:3])
+    if manual_n:
+        scope_value += f" · {manual_n} zone escluse a mano"
     c.setFont("Helvetica", 8)
     while c.stringWidth(scope_value, "Helvetica-Bold", 8) > 320:
         scope_value = scope_value[:-2]

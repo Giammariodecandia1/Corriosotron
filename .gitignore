@@ -6,3 +6,5 @@ tmp/
 **/tmp/
 # machine-specific list of YOLO model folders (v2)
 dinov2-corrosion-v2/modelli_oggetti/cartelle.json
+# server error log (v2 / Rustron)
+errori_server.log

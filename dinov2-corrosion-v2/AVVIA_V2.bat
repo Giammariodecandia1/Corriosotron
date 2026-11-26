@@ -1,11 +1,11 @@
 @echo off
 setlocal
-title AIRVisionCheck v2 - server (NON chiudere questa finestra)
+title Rustron - Corrosion Intelligence - server (NON chiudere questa finestra)
 cd /d "%~dp0"
 
 echo.
 echo  ==========================================================
-echo   AIRVisionCheck - Corrosion Intelligence v2
+echo   Rustron / Corrosion Intelligence
 echo   Indirizzo: http://127.0.0.1:8766
 echo  ==========================================================
 echo.

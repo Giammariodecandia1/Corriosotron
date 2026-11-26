@@ -1,4 +1,23 @@
-# DINOv2 Corrosion Intelligence · v2
+# Rustron / Corrosion Intelligence
+
+Rustron è il nome ufficiale della v2. Si avvia con **`AVVIA RUSTRON.bat`**, che si trova nella cartella principale.
+
+## Maschera del metallo: anticipata, solo dove serve, su tutti i core
+
+- **Parte in anticipo.** Appena la ROI e gli oggetti sono definiti, BiRefNet comincia a calcolare la maschera del metallo. Intanto puoi controllare gli oggetti e scegliere il profilo. Sotto la foto compare l'avanzamento, per esempio "riquadro 5/15"; quando la maschera è pronta, **Analizza** richiede circa 1–2 minuti, nelle prove anche solo 8 secondi.
+- **Salta i riquadri inutili.** I riquadri che stanno tutti fuori dalle zone "Analizza solo qui" o tutti dentro zone escluse non vengono calcolati, perché il loro risultato verrebbe scartato. La calibrazione e "Aggiungi esempi" calcolano invece la maschera completa, perché i marker possono stare ovunque.
+- **Nessun lavoro perso.** I riquadri finiti restano salvati per 3 giorni. Se il server si chiude, o cambi la scelta degli oggetti, il calcolo riparte da lì, purché la ROI sia identica.
+- **Tutti i core.** BiRefNet usa tutti i core: YOLO imponeva un solo core, il limite è stato tolto.
+- **Niente risultati senza maschera.** Se la maschera non è disponibile, l'analisi si ferma con un messaggio invece di dare un numero sbagliato.
+- **Errori registrati.** Gli errori imprevisti finiscono in `errori_server.log`.
+
+## Zone escluse nel report
+
+Nella mappa di classificazione e nel PDF le zone escluse hanno due colori, spiegati in una legenda sotto la mappa:
+- **blu:** oggetti esclusi da un modello YOLO;
+- **azzurro chiaro:** zone escluse a mano, disegnate dall'operatore.
+
+La riga "Ambito" del PDF riporta anche il numero di zone escluse a mano.
 
 La v2 è una copia separata del primo strumento (`dinov2-corrosion-poc`, che resta invariato) con in più il **riconoscimento automatico degli oggetti**. Gira su **http://127.0.0.1:8766** (la prima versione resta sulla 8765), quindi le due possono essere aperte insieme.
 
@@ -33,6 +52,17 @@ Le correzioni restano registrate nel report:
 - **CSV:** la colonna `modifica_operatore`.
 
 Un nuovo rilevamento azzera le correzioni, per esempio quando cambi la confidenza o i modelli attivi.
+
+## ROI automatica (senza disegnarla)
+
+Se nessuna ROI è disegnata a mano e almeno una classe è su **Analizza solo questo**, per esempio *Sostegni*, la ROI viene presa in automatico. È il riquadro del **sostegno principale** più gli oggetti "solo questo" che stanno per lo più dentro di lui, con un margine del 3%. Sulla foto compare tratteggiata.
+
+- **Come sceglie il sostegno principale:** prende quello con il riquadro più grande, pesato per la confidenza, cioè di solito quello in primo piano. I tralicci sullo sfondo restano fuori dalla ROI.
+- **Per cambiarlo:** tasto destro su un altro oggetto "solo questo", poi **Usa come ROI automatica**. Se togli il sostegno scelto, la ROI passa al successivo.
+- **Le classi su Escludi valgono anche dentro il sostegno.** Per esempio *Etichetta su Sostegno* e *Isolatori* vengono escluse anche se stanno dentro il riquadro del sostegno.
+- **La ROI disegnata a mano ha sempre la precedenza.** **Intera foto** disattiva la ROI automatica per quella foto. La casella **ROI automatica sugli oggetti «Analizza solo qui»**, nel pannello oggetti, la spegne del tutto.
+
+Con la ROI automatica il rilevamento gira su tutta la foto, perché la ROI nasce proprio dai suoi risultati. La maschera di dettaglio BiRefNet invece si calcola solo nella ROI, quindi l'analisi resta veloce.
 
 ## Scegliere i modelli
 
