@@ -99,13 +99,49 @@ def footer(c, page_label=""):
     c.drawRightString(R, T(806), "Eagle Projects S.p.A.")
 
 
+MAP_MIN_H = 175   # below this the map box would be too small to read
+
+
+def map_box(c, x, top, w, h, info):
+    """Shooting point: OpenStreetMap extract with the pin, EXIF coordinates and a Google Maps link."""
+    c.setFillColor(PALE)
+    c.roundRect(x, T(top + h), w, h, 6, fill=1, stroke=0)
+    line(c, "POSIZIONE DELLO SCATTO", x + 9, T(top + 15), w - 18, 7.5, True, NAVY)
+    area_top, area_h = top + 23, h - 23 - 38
+    image = info.get("image")
+    if image is not None:
+        iw, ih = image.size
+        scale = min((w - 16) / iw, area_h / ih)
+        dw, dh = iw * scale, ih * scale
+        c.drawImage(ImageReader(image_data(image)), x + (w - dw) / 2, T(area_top + area_h) + (area_h - dh) / 2, dw, dh)
+    else:
+        c.setStrokeColor(RULE)
+        c.rect(x + 8, T(area_top + area_h), w - 16, area_h, fill=0, stroke=1)
+        for n, part in enumerate(simpleSplit("Mappa non disponibile: " + (info.get("note") or "") + ". Usa il link qui sotto.", "Helvetica", 7.5, w - 32)[:4]):
+            line(c, part, x + 16, T(area_top + area_h / 2 - 10 + 10 * n), w - 32, 7.5, color=MUTED)
+    line(c, "Coordinate (GPS della foto): " + (info.get("coordinates") or ""), x + 9, T(top + h - 24), w - 18, 7.5, color=INK)
+    label = "Apri il punto in Google Maps »"
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(BLUE)
+    lx, ly = x + 9, T(top + h - 10)
+    c.drawString(lx, ly, label)
+    lw = c.stringWidth(label, "Helvetica-Bold", 8)
+    c.setStrokeColor(BLUE)
+    c.setLineWidth(0.6)
+    c.line(lx, ly - 1.5, lx + lw, ly - 1.5)
+    c.setLineWidth(1)
+    c.linkURL(info["url"], (lx, ly - 3, lx + lw, ly + 9), relative=0, thickness=0)
+
+
 BAND_COLORS = {"rilevante": RED, "da monitorare": HexColor("#D79A00")}
 BAND_LABELS = {"rilevante": "Rilevante", "da monitorare": "Da monitorare"}
 MAX_TABLE_ROWS = 30
 
 
-def anomalies_page(c, photo_name, classified_image, clusters):
-    """Page 2: classification map with numbered anomaly boxes and the anomaly table."""
+def anomalies_page(c, photo_name, classified_image, clusters, shot_map=None):
+    """Page 2: classification map with numbered anomaly boxes and the anomaly table.
+    With `shot_map`, the map of the shooting point goes in the free space under the table when it
+    fits. Returns True when it was placed there."""
     found = clusters.get("clusters") or []
     header(c, "Anomalie numerate", f"{len(found)} sopra soglia  ·  {photo_name or ''}")
     iw, ih = classified_image.size
@@ -187,11 +223,20 @@ def anomalies_page(c, photo_name, classified_image, clusters):
               f"(1% dell'estensione del traliccio). "
               "Estensione = altezza dell'anomalia in % dell'altezza del traliccio inquadrato. "
               "ID numerati per grandezza: A1 è la più estesa.")
-    for n, part in enumerate(simpleSplit(legend, "Helvetica", 7, table_w - 8)[:6]):
+    parts = simpleSplit(legend, "Helvetica", 7, table_w - 8)[:6]
+    for n, part in enumerate(parts):
         line(c, part, table_x + 4, T(y + 16 + 10 * n), table_w - 8, 7, color=MUTED)
+    free_top = y + 16 + 10 * len(parts) + 12
+    if shot_map and 770 - free_top >= MAP_MIN_H:
+        image = shot_map.get("image")
+        needed = 23 + 38 + 6 + ((table_w - 16) * image.size[1] / image.size[0] if image is not None else 120)
+        h = max(MAP_MIN_H, min(770 - free_top, needed))
+        map_box(c, table_x, free_top, table_w, h, shot_map)
+        return True
+    return False
 
 
-def build_pdf(photo_name, roi_image, classified_image, report, operator_notes="", clusters=None):
+def build_pdf(photo_name, roi_image, classified_image, report, operator_notes="", clusters=None, shot_map=None):
     """Return the PDF. Page 1 always; page 2 (numbered anomalies) only when `clusters`
     is given, i.e. the operator ticked "Clusterizza anomalie". Date and GPS are read
     from the photo metadata (report["shot_captured_at"], report["shot_coordinates"])."""
@@ -233,6 +278,9 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
         legend.append((HexColor("#547EFF"), "Esclusi dal modello (YOLO)"))
     if manual_n:
         legend.append((HexColor("#28BEFF"), f"Esclusi a mano ({manual_n})"))
+    cables_n = (report.get("cable_exclusion") or {}).get("cables") or 0
+    if cables_n:
+        legend.append((HexColor("#BE46FF"), f"Cavi esclusi ({cables_n})"))
     for index, (image, title) in enumerate(panels):
         x = L + index * (box_w + gap)
         c.setFillColor(PALE)
@@ -285,6 +333,9 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
         scope_value = "metallo visibile · " + ", ".join(parts[:3])
     if manual_n:
         scope_value += f" · {manual_n} zone escluse a mano"
+    cables_found = (report.get("cable_exclusion") or {}).get("cables") or 0
+    if cables_found:
+        scope_value += f" · {cables_found} cavi esclusi"
     c.setFont("Helvetica", 8)
     while c.stringWidth(scope_value, "Helvetica-Bold", 8) > 320:
         scope_value = scope_value[:-2]
@@ -304,11 +355,23 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
         c.line(L + 12, T(notes_top + 35), R - 12, T(notes_top + 35))
         c.line(L + 12, T(notes_top + 50), R - 12, T(notes_top + 50))
 
-    footer(c, "Pag. 1/2" if clusters else "")
+    # Optional map of the shooting point: in the free space of the anomalies page when it fits,
+    # otherwise on a page of its own. Never present unless the operator asked for it.
+    map_on_anomalies = bool(shot_map and clusters and anomalies_page(canvas.Canvas(io.BytesIO(), pagesize=A4), photo_name, classified_image, clusters, shot_map))
+    pages = 1 + (1 if clusters else 0) + (1 if shot_map and not map_on_anomalies else 0)
+    footer(c, f"Pag. 1/{pages}" if pages > 1 else "")
     c.showPage()
+    page = 1
     if clusters:
-        anomalies_page(c, photo_name, classified_image, clusters)
-        footer(c, "Pag. 2/2")
+        page += 1
+        anomalies_page(c, photo_name, classified_image, clusters, shot_map if map_on_anomalies else None)
+        footer(c, f"Pag. {page}/{pages}")
+        c.showPage()
+    if shot_map and not map_on_anomalies:
+        page += 1
+        header(c, "Posizione dello scatto", f"{photo_name or ''}")
+        map_box(c, L, 125, W, 420, shot_map)
+        footer(c, f"Pag. {page}/{pages}")
         c.showPage()
     c.save()
     return out.getvalue()

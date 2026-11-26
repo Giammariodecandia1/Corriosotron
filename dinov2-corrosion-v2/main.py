@@ -15,12 +15,15 @@ import color_evidence as ce
 import report_pdf
 import photo_meta
 import anomaly_clusters
+import shot_map
+import cable_detection
 import object_detection as od
 
 ROOT=Path(__file__).resolve().parent
 MODEL_ID="facebook/dinov2-small"
 LABELS=("background","healthy","medium","intense")
 OBJECT_EXCLUDED_RGBA=(84,126,255,120)      # excluded by a YOLO model (automatic)
+CABLE_EXCLUDED_RGBA=(190,70,255,170)       # power cables found automatically (optional)
 MANUAL_EXCLUDED_RGBA=(40,190,255,135)      # excluded by hand (drawn by the operator): same blue family, lighter/cyan
 OUTSIDE_FOCUS_RGBA=(5,10,18,150)
 COLORS={"healthy":(33,175,143,75),"medium":(249,202,61,155),"intense":(238,62,88,165),"uncertain":(220,225,235,135)}
@@ -258,7 +261,7 @@ def remove_object_folder(folder:str):
     return object_models()
 
 @app.post("/api/detect-objects")
-async def detect_objects_endpoint(file:UploadFile=File(...),models:str=Form("[]"),confidence:float=Form(0.35),use_sam:bool=Form(True),roi:str=Form("")):
+async def detect_objects_endpoint(file:UploadFile=File(...),models:str=Form("[]"),confidence:float=Form(0.25),use_sam:bool=Form(True),roi:str=Form("")):
     try:
         ids=json.loads(models)
         if not isinstance(ids,list) or not ids or not all(isinstance(x,str) for x in ids) or len(ids)>16:raise ValueError()
@@ -272,6 +275,19 @@ async def detect_objects_endpoint(file:UploadFile=File(...),models:str=Form("[]"
     except OSError as exc:raise HTTPException(503,f"Modello SAM non scaricabile: {exc}") from exc
     finally:img.close()
     return {"detections":detections,"instance_mask_base64":base64.b64encode(png).decode("ascii"),"info":info}
+
+async def meta_from_upload(meta_source,img,filename):
+    """Big photos are shrunk in the browser, which drops EXIF; the page then sends the head of the
+    original file (EXIF lives there). Date and GPS are read from it: never typed by the operator."""
+    if meta_source is None:return
+    raw=await meta_source.read(2*1024*1024)
+    try:
+        with Image.open(io.BytesIO(raw)) as head:
+            meta=photo_meta.read_shot_meta(head,filename or "")
+    except (OSError,UnidentifiedImageError,ValueError,SyntaxError):return
+    current=img.info.get("shot_meta") or {}
+    if meta.get("coordinates") and not current.get("coordinates") or meta.get("date_source")=="EXIF" and current.get("date_source")!="EXIF":
+        img.info["shot_meta"]={**current,**{k:v for k,v in meta.items() if v is not None}}
 
 async def objects_from_upload(file,rules_text,info_text,img):
     """Instance mask (from /api/detect-objects) + per-detection modes -> (ids, rules, info)."""
@@ -536,7 +552,7 @@ def validated_profile(profile_id="legacy"):
     except (OSError,ValueError,KeyError,TypeError,OverflowError) as exc:
         raise HTTPException(409,f"Profilo non valido o incompatibile: {exc}. Eliminare esplicitamente il profilo precedente e calibrare di nuovo.")
 
-def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,foreground_sha256=None,exclusions=None,profile_persisted=True,metal=None,metal_note=None,markers_off_metal=0,photo_name="",operator_notes="",shot_meta=None,cluster_anomalies=False,objects=None):
+def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,foreground_sha256=None,exclusions=None,profile_persisted=True,metal=None,metal_note=None,markers_off_metal=0,photo_name="",operator_notes="",shot_meta=None,cluster_anomalies=False,objects=None,shot_map_requested=False,remove_cables=False):
     """objects: (instance ids, rules, info) from objects_from_upload, or None.
     metal: sharp ROI metal mask (bool, ROI pixel size). With it, and a profile whose
     samples carry colours, rust is decided per pixel from colour; the DINOv2 patch
@@ -572,6 +588,15 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
         support=np.asarray(foreground_mask.crop(geo["box"]).resize((w,h),Image.Resampling.BILINEAR))>=128
     excluded=excluded_pixels(exclusions or [],geo,w,h)
     manual_excluded=excluded.copy()  # drawn by the operator, kept apart for the map colour
+    cable_grid=None;cable_report=None
+    if remove_cables:  # optional: power cables found in the sharp metal mask (cable_detection.py)
+        if metal_mask is None:
+            cable_report={"enabled":True,"applied":False,"note":"maschera di dettaglio non disponibile"}
+        else:
+            cm,cinfo=cable_detection.find_cables(metal_mask)
+            cable_grid=np.asarray(Image.fromarray(cm.astype(np.uint8)*255).resize((w,h),Image.Resampling.BILINEAR))>=64
+            excluded=excluded|cable_grid
+            cable_report={"enabled":True,"applied":True,**cinfo,"pixels_in_analysis_grid":int(cable_grid.sum()),"map_rgba":list(CABLE_EXCLUDED_RGBA)}
     excluded_foreground=int((excluded & support).sum()) if support is not None else int(excluded.sum())
     object_report=None;object_excluded=object_focus=None
     if objects is not None:
@@ -652,6 +677,7 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
     if object_focus is not None:overlay[~object_focus]=OUTSIDE_FOCUS_RGBA
     if object_excluded is not None:overlay[object_excluded]=OBJECT_EXCLUDED_RGBA
     if manual_excluded.any():overlay[manual_excluded]=MANUAL_EXCLUDED_RGBA
+    if cable_grid is not None and cable_grid.any():overlay[cable_grid]=CABLE_EXCLUDED_RGBA
     blend=Image.alpha_composite(crop.resize((w,h)).convert("RGBA"),Image.fromarray(overlay,"RGBA"))
     b=io.BytesIO();blend.convert("RGB").save(b,format="PNG")
     # Indexed PNG: pixel values remain stable class IDs, while viewers show colors.
@@ -687,6 +713,7 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
                          "threshold_alpha_0_to_255":128 if support is not None else None,
                          "foreground_pixels_in_roi":int(support.sum()) if support is not None else None,
                          "foreground_pct_of_roi":round(100*float(support.mean()),2) if support is not None else None},
+      "cable_exclusion":cable_report or {"enabled":False},
       "insulator_exclusions":{"geometry":"oriented_capsule","regions":exclusions or [],"map_rgba":list(MANUAL_EXCLUDED_RGBA),"pixels_in_analysis_grid":int(manual_excluded.sum()),
                                "excluded_foreground_pixels_in_roi":excluded_foreground},
       "parameters":{"resolution":int(geo["side"]),"roi_original_pixels":list(geo["box"]),
@@ -751,8 +778,21 @@ def classify(vec,crop,geo,p,seconds,source_sha256=None,foreground_mask=None,fore
                              a["extent_pct_of_tower_height"],*a["bbox_px"]])
         writer.writerow(["anomalie_sotto_soglia",clusters["below_threshold_count"],
                          "merge_distance_px",clusters["merge_distance_px"]])
+    map_info=None
+    if shot_map_requested:
+        lat,lon=(shot_meta or {}).get("latitude"),(shot_meta or {}).get("longitude")
+        if lat is None or lon is None:
+            report["shot_map"]={"requested":True,"included":False,"note":"la foto non contiene coordinate GPS"}
+            report["quality_warnings"].append("Mappa del punto di scatto richiesta, ma la foto non contiene coordinate GPS nei metadati: mappa non inserita.")
+        else:
+            image,map_note=shot_map.static_map(lat,lon)
+            url=shot_map.google_maps_url(lat,lon)
+            map_info={"image":image,"lat":lat,"lon":lon,"url":url,"coordinates":report["shot_coordinates"],"note":map_note,"attribution":shot_map.ATTRIBUTION}
+            report["shot_map"]={"requested":True,"included":True,"map_image":image is not None,"google_maps_url":url,"latitude":lat,"longitude":lon,
+                                "source":"OpenStreetMap" if image is not None else None,"note":map_note}
+            if map_note:report["quality_warnings"].append("Mappa del punto di scatto: "+map_note+". Nel report restano coordinate e link a Google Maps.")
     pdf=report_pdf.build_pdf(photo_name,crop.resize((w,h),Image.Resampling.LANCZOS),blend.convert("RGB"),report,
-                             report["operator_notes"],clusters=clusters)
+                             report["operator_notes"],clusters=clusters,shot_map=map_info)
     return {"report":report,"report_pdf_base64":base64.b64encode(pdf).decode("ascii"),"overlay_base64":base64.b64encode(b.getvalue()).decode("ascii"),
             "ambiguity_mask_base64":base64.b64encode(ambiguity_bytes.getvalue()).decode("ascii"),
             "class_mask_base64":base64.b64encode(mask_bytes.getvalue()).decode("ascii"),
@@ -795,7 +835,7 @@ def list_profiles():
     return {"profiles":items}
 
 @app.post("/api/calibrate")
-async def calibrate(file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),save_profile:bool=Form(True),profile_name:str=Form(""),feature_mode:str=Form("standard"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}")):
+async def calibrate(file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),save_profile:bool=Form(True),profile_name:str=Form(""),feature_mode:str=Form("standard"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}"),shot_map:bool=Form(False),remove_cables:bool=Form(False),meta_source:UploadFile|None=File(None)):
     name=profile_name.strip()
     if save_profile and not name:raise HTTPException(422,"Assegnare un nome al profilo")
     if len(name)>64:raise HTTPException(422,"Nome profilo: massimo 64 caratteri")
@@ -812,9 +852,10 @@ async def calibrate(file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("
     p=train(vec,img,geo,points,source_sha256=source_sha256,color_source=None if metal is None else (np.asarray(crop),metal))
     off_metal=p.pop("markers_off_metal",0)
     p["profile_name"]=name if save_profile else "Prova dettaglio ROI"
+    await meta_from_upload(meta_source,img,file.filename)
     out=classify(vec,crop,geo,p,sec,source_sha256,support,support_sha256,parse_exclusions(exclusions),profile_persisted=save_profile,
                  metal=metal,metal_note=note,markers_off_metal=off_metal,photo_name=file.filename or "",shot_meta=img.info.get("shot_meta"),
-                 operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,objects=objects)
+                 operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,objects=objects,shot_map_requested=shot_map,remove_cables=remove_cables)
     if save_profile:
         with PROFILE_LOCK:
             PROFILE_DIR.mkdir(parents=True,exist_ok=True)
@@ -825,7 +866,7 @@ async def calibrate(file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("
     return out
 
 @app.post("/api/analyze")
-async def analyze(file:UploadFile=File(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),profile_id:str=Form("legacy"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}")):
+async def analyze(file:UploadFile=File(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),profile_id:str=Form("legacy"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}"),shot_map:bool=Form(False),remove_cables:bool=Form(False),meta_source:UploadFile|None=File(None)):
     p=validated_profile(profile_id);img,source_sha256=await image_from_upload(file);box=region(img,roi)
     support,support_sha256=await foreground_from_upload(foreground_mask,img)
     objects=await objects_from_upload(object_mask,object_rules,object_info,img)
@@ -838,10 +879,11 @@ async def analyze(file:UploadFile=File(...),roi:str=Form("[0,0,1,1]"),resolution
         # Without any metal mask every ROI pixel (ground, roads, roofs) would be counted as metal:
         # the rust figure would be meaningless, so no result is better than a wrong one.
         raise HTTPException(503,"Analisi non eseguita: la maschera del metallo nella ROI non è stata calcolata ("+str(note)+"). Senza maschera anche strade e terreno verrebbero contati come metallo e la percentuale di ruggine sarebbe sbagliata. Ripeti l'analisi: i riquadri già calcolati sono salvati e non si rifanno.")
-    return classify(vec,crop,geo,p,sec,source_sha256,support,support_sha256,parse_exclusions(exclusions),metal=metal,metal_note=note,photo_name=file.filename or "",operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,shot_meta=img.info.get("shot_meta"),objects=objects)
+    await meta_from_upload(meta_source,img,file.filename)
+    return classify(vec,crop,geo,p,sec,source_sha256,support,support_sha256,parse_exclusions(exclusions),metal=metal,metal_note=note,photo_name=file.filename or "",operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,shot_meta=img.info.get("shot_meta"),objects=objects,shot_map_requested=shot_map,remove_cables=remove_cables)
 
 @app.post("/api/profiles/{profile_id}/samples")
-async def add_profile_samples(profile_id:str,file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}")):
+async def add_profile_samples(profile_id:str,file:UploadFile=File(...),seeds:str=Form(...),roi:str=Form("[0,0,1,1]"),resolution:int=Form(392),foreground_mask:UploadFile|None=File(None),exclusions:str=Form("[]"),operator_notes:str=Form(""),cluster_anomalies:bool=Form(False),object_mask:UploadFile|None=File(None),object_rules:str=Form("[]"),object_info:str=Form("{}"),shot_map:bool=Form(False),remove_cables:bool=Form(False),meta_source:UploadFile|None=File(None)):
     if profile_id=="legacy":raise HTTPException(409,"Il profilo legacy non si modifica; crea un nuovo profilo nominato")
     with PROFILE_LOCK:
         p=validated_profile(profile_id)
@@ -884,9 +926,10 @@ async def add_profile_samples(profile_id:str,file:UploadFile=File(...),seeds:str
         counts[label]=int(counts.get(label,0))+int(addition["sample_counts"].get(label,0))
     p["prototype_sums"]=sums;p["profile_merge_approximate"]=bool(p.get("profile_merge_approximate",False) or approximate)
     p["updated_at_utc"]=datetime.now(timezone.utc).isoformat()
+    await meta_from_upload(meta_source,img,file.filename)
     out=classify(vec,crop,geo,p,sec,source_sha256,support,support_sha256,parse_exclusions(exclusions),
                  metal=metal,metal_note=note,markers_off_metal=addition.get("markers_off_metal",0),photo_name=file.filename or "",shot_meta=img.info.get("shot_meta"),
-                 operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,objects=objects)
+                 operator_notes=operator_notes,cluster_anomalies=cluster_anomalies,objects=objects,shot_map_requested=shot_map,remove_cables=remove_cables)
     path=profile_file(profile_id)
     with PROFILE_LOCK:
         if not path.exists() or path.read_bytes()!=expected:

@@ -225,15 +225,20 @@ def _box_mask(box, h, w):
     return m
 
 
-def detect(img, model_ids, conf=0.35, use_sam=True, roi_box=None):
+NMS_IOU = 0.7          # Ultralytics / YoloTron default: close parallel strings are not merged away
+MIN_INSIDE_ROI = 0.25  # an object is kept when at least this share of its box lies inside the ROI
+
+
+def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
     """img: PIL RGB (already EXIF-oriented). Returns (detections, instance PNG bytes, info).
 
     roi_box: (x0, y0, x1, y1) photo pixels of the operator's ROI, or None for the whole photo.
-    With a ROI, YOLO and SAM only see the ROI (objects outside it are not searched, and
-    small objects are seen at a higher resolution); the results are put back in photo
-    coordinates. The PNG has the photo's size; pixel value n (1..254) = detection n,
-    0 = nothing. Larger objects are painted first, so a small object inside a large one
-    stays visible.
+    YOLO always sees the WHOLE photo, as in training and in YoloTron: on a ROI crop the objects
+    look much larger than the model learned and confidence drops (measured: 0.39-0.62 on the crop
+    vs 0.61-0.70 on the photo, with insulators missed). With a ROI only the objects that touch it
+    are kept, and SAM works on the ROI area (plus those objects), where its outlines are sharper.
+    The PNG has the photo's size; pixel value n (1..254) = detection n, 0 = nothing. Larger
+    objects are painted first, so a small object inside a large one stays visible.
     """
     if not 0.01 <= conf <= 0.99:
         raise ValueError("Confidenza fuori intervallo (0,01-0,99)")
@@ -248,29 +253,46 @@ def detect(img, model_ids, conf=0.35, use_sam=True, roi_box=None):
         available[info["id"]] = info
     model_ids = list(available)
     full_w, full_h = img.size
-    ox, oy = (int(roi_box[0]), int(roi_box[1])) if roi_box else (0, 0)
-    if roi_box:
-        img = img.crop(tuple(int(v) for v in roi_box))
-    w, h = img.size
+    photo = img
     t0 = time.perf_counter()
-    found = []  # (model_id, class_name, conf, box, mask or None)
+    found = []  # (model_id, class_name, conf, box in photo px, full-photo mask or None)
     with LOCK:
         for model_id in model_ids:
             meta = available[model_id]
             m = _load_yolo(model_id)
-            result = m.predict(img, imgsz=meta["imgsz"], conf=conf, iou=0.5, max_det=MAX_OBJECTS,
+            result = m.predict(photo, imgsz=meta["imgsz"], conf=conf, iou=NMS_IOU, max_det=MAX_OBJECTS,
                                device="cpu", verbose=False)[0]
             boxes, classes, confs = _boxes(result)
-            masks = None
-            if getattr(result, "masks", None) is not None and len(boxes):
-                data = result.masks.data.cpu().numpy() > 0.5
-                masks = [np.asarray(Image.fromarray(x).resize((w, h), Image.Resampling.NEAREST)) for x in data]
+            seg = result.masks.data.cpu().numpy() > 0.5 if getattr(result, "masks", None) is not None and len(boxes) else None
             for i in range(len(boxes)):
+                b = boxes[i]
+                if roi_box is not None:
+                    ix = max(0.0, min(b[2], roi_box[2]) - max(b[0], roi_box[0]))
+                    iy = max(0.0, min(b[3], roi_box[3]) - max(b[1], roi_box[1]))
+                    if ix * iy < MIN_INSIDE_ROI * max(1.0, (b[2] - b[0]) * (b[3] - b[1])):
+                        continue
                 found.append([model_id, meta["classes"].get(int(classes[i]), str(classes[i])), float(confs[i]),
-                              boxes[i], None if masks is None else masks[i]])
+                              b, None if seg is None else seg[i]])
         found.sort(key=lambda f: -f[2])
         found = found[:MAX_OBJECTS]
         t_yolo = time.perf_counter() - t0
+        # working area: the ROI, grown to contain the kept objects (whole photo without a ROI)
+        if roi_box is not None:
+            x0, y0, x1, y1 = (float(v) for v in roi_box)
+            for f in found:
+                x0, y0, x1, y1 = min(x0, f[3][0]), min(y0, f[3][1]), max(x1, f[3][2]), max(y1, f[3][3])
+            ox, oy = max(0, int(x0)), max(0, int(y0))
+            ex, ey = min(full_w, int(np.ceil(x1))), min(full_h, int(np.ceil(y1)))
+            img = photo.crop((ox, oy, ex, ey))
+        else:
+            ox, oy = 0, 0
+            img = photo
+        w, h = img.size
+        for f in found:
+            f[3] = np.array([f[3][0] - ox, f[3][1] - oy, f[3][2] - ox, f[3][3] - oy], dtype=float)
+            if f[4] is not None:  # YOLO-seg mask (model resolution) -> working area
+                full = np.asarray(Image.fromarray(f[4]).resize((full_w, full_h), Image.Resampling.NEAREST))
+                f[4] = full[oy:oy + h, ox:ox + w]
         need_sam = [i for i, f in enumerate(found) if f[4] is None]
         sam_used = None
         if need_sam and use_sam:

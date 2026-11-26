@@ -11,6 +11,21 @@ Rustron è il nome ufficiale della v2. Si avvia con **`AVVIA RUSTRON.bat`**, che
 - **Niente risultati senza maschera.** Se la maschera non è disponibile, l'analisi si ferma con un messaggio invece di dare un numero sbagliato.
 - **Errori registrati.** Gli errori imprevisti finiscono in `errori_server.log`.
 
+## Mappa del punto di scatto (opzionale)
+
+Nel passo "Report" c'è la casella **Mappa del punto di scatto**. Se non è spuntata, il report non cambia.
+
+Se è spuntata, il PDF aggiunge un riquadro **"Posizione dello scatto"** con:
+- un estratto di OpenStreetMap e il segnaposto nel punto esatto;
+- le coordinate;
+- il link cliccabile **"Apri il punto in Google Maps"**.
+
+**Dove compare:** se hai chiesto anche le anomalie numerate, il riquadro va nello spazio libero della pagina 2, sotto la tabella. Altrimenti viene aggiunta una pagina "Posizione dello scatto".
+
+**Coordinate:** vengono lette solo dai metadati GPS della foto. Se mancano, il report lo segnala e la mappa non viene inserita.
+
+**Internet:** per scaricare la mappa serve la connessione. Al server di OpenStreetMap vanno solo le coordinate, la foto no. I riquadri della mappa restano in `model_cache\osm_tiles`, quindi la stessa zona si scarica una volta sola. Senza connessione il report contiene comunque coordinate e link.
+
 ## Zone escluse nel report
 
 Nella mappa di classificazione e nel PDF le zone escluse hanno due colori, spiegati in una legenda sotto la mappa:

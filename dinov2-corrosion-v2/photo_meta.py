@@ -83,4 +83,6 @@ def read_shot_meta(image, filename=""):
         "captured_at": captured.strftime("%d/%m/%Y %H:%M:%S") if captured else None,
         "date_source": source,
         "coordinates": format_coordinates(*gps) if gps else None,
+        "latitude": round(gps[0], 7) if gps else None,
+        "longitude": round(gps[1], 7) if gps else None,
     }
