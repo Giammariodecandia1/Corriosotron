@@ -1,6 +1,6 @@
 """Eagle Projects DINOv2 CPU corrosion tool v2: adds object recognition (YOLO + SAM) to
 exclude objects from the analysis or analyse only them. Research demo, not a structural assessment."""
-import os, io, json, base64, threading, time, hashlib, uuid
+import os, io, json, base64, threading, time, hashlib, uuid, re
 import csv, asyncio
 import subprocess, tempfile, shutil
 from pathlib import Path
@@ -101,7 +101,8 @@ def needed_mask(objects,box):
 def fine_keys(source_sha256,box,need):
     """(final mask key, tiles key). Tiles depend only on photo + ROI, so they are shared by every
     variant of objects/modes; the final mask also depends on which tiles were skipped."""
-    base=hashlib.sha256(f"{source_sha256}:{list(box)}:tiles_v1".encode()).hexdigest()[:32]
+    layout="tiles_v1" if os.getenv("V2_TILE_LAYOUT","compact")=="classic" else "tiles_v2"  # see segmenta_riquadri.plan
+    base=hashlib.sha256(f"{source_sha256}:{list(box)}:{layout}".encode()).hexdigest()[:32]
     if need is None:return base,base
     h=hashlib.sha256(np.packbits(need).tobytes()+str(need.shape).encode()).hexdigest()[:16]
     return hashlib.sha256(f"{base}:{h}".encode()).hexdigest()[:32],base
@@ -229,6 +230,49 @@ async def foreground_mask_endpoint(file:UploadFile=File(...)):
         img.close()
     return Response(png,media_type="image/png",headers={"Cache-Control":"no-store"})
 
+# ---- named analysis settings ("Impostazioni"): one JSON per name, reusable later and by a batch run
+PRESETS_DIR=ROOT/"impostazioni"
+PRESET_KEYS={"models","object_confidence","profile_id","profile_name","auto_roi_focus","remove_cables","cluster_anomalies",
+             "shot_map","exclusion_width","resolution","feature_mode"}
+
+def _preset_path(name):
+    clean=re.sub(r"\s+"," ",re.sub(r'[<>:"/\\|?*\x00-\x1f]',"",name or "")).strip().rstrip(".")[:64]
+    if not clean:raise HTTPException(422,"Dai un nome all'impostazione")
+    return clean,PRESETS_DIR/(clean+".json")
+
+def _presets():
+    out=[]
+    for f in sorted(PRESETS_DIR.glob("*.json"),key=lambda p:p.stem.casefold()) if PRESETS_DIR.is_dir() else []:
+        try:
+            data=json.loads(f.read_text("utf-8"))
+            if isinstance(data,dict) and isinstance(data.get("settings"),dict):out.append(data)
+        except (OSError,ValueError):continue
+    return out
+
+@app.get("/api/presets")
+def list_presets():
+    return {"presets":_presets()}
+
+@app.post("/api/presets")
+def save_preset(name:str=Form(...),settings:str=Form(...)):
+    clean,path=_preset_path(name)
+    if len(settings)>64*1024:raise HTTPException(413,"Impostazione troppo grande")
+    try:data=json.loads(settings)
+    except ValueError:raise HTTPException(422,"Impostazione non valida")
+    if not isinstance(data,dict):raise HTTPException(422,"Impostazione non valida")
+    data={k:v for k,v in data.items() if k in PRESET_KEYS}
+    PRESETS_DIR.mkdir(exist_ok=True)
+    existed=path.is_file()
+    tmp=path.with_suffix(".tmp");tmp.write_text(json.dumps({"name":clean,"saved_at":datetime.now(timezone.utc).isoformat(timespec="seconds"),"schema":1,"settings":data},ensure_ascii=False,indent=1),"utf-8");tmp.replace(path)
+    return {"presets":_presets(),"saved":clean,"replaced":existed}
+
+@app.delete("/api/presets")
+def delete_preset(name:str):
+    clean,path=_preset_path(name)
+    if not path.is_file():raise HTTPException(404,"Impostazione non trovata")
+    path.unlink()
+    return {"presets":_presets()}
+
 @app.get("/api/object-models")
 def object_models():
     """Folders and the .pt files in each, without loading them (drop-down menu)."""
@@ -259,6 +303,14 @@ def remove_object_folder(folder:str):
     try:od.remove_folder(folder)
     except ValueError as exc:raise HTTPException(422,str(exc)) from exc
     return object_models()
+
+@app.get("/api/detect-status")
+def detect_status():
+    """Progress of the object recognition running now (for the page's progress bar)."""
+    p=dict(od.PROGRESS);now=time.time()
+    if p.get("state")=="running":
+        p["elapsed"]=round(now-p.get("started",now),1);p["stage_elapsed"]=round(now-p.get("stage_started",now),1)
+    return p
 
 @app.post("/api/detect-objects")
 async def detect_objects_endpoint(file:UploadFile=File(...),models:str=Form("[]"),confidence:float=Form(0.25),use_sam:bool=Form(True),roi:str=Form("")):

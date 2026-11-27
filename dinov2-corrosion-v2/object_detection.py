@@ -5,7 +5,9 @@ plus any folder the operator adds from the UI (saved in `modelli_oggetti/cartell
 Several models can be active in the same analysis. For each detected object the
 operator chooses, per class, what it means for the corrosion analysis:
   - "exclude": the object's pixels are removed from the analysis (e.g. insulators);
-  - "focus":   the analysis only looks inside these objects (e.g. a support, later);
+  - "focus":   the analysis only looks inside these objects' outlines;
+  - "roi":     only the object's box is used, as automatic ROI (e.g. lattice supports, which SAM
+               fills as a solid silhouette); inside it the analysis works as with a drawn ROI;
   - "ignore":  the object is shown but changes nothing.
 
 Detection-only models give boxes: SAM turns each box into the object's real outline.
@@ -31,11 +33,15 @@ SAM_DIR = ROOT / "model_cache" / "sam"
 # lattice behind them, which would remove sound steel from the analysis.
 SAM_WEIGHTS = os.getenv("V2_SAM_WEIGHTS", "sam2.1_b.pt")
 SAM_URL = "https://github.com/ultralytics/assets/releases/download/v8.3.0/{}"
-MODES = ("exclude", "focus", "ignore")
+MODES = ("exclude", "focus", "roi", "ignore")
 MAX_OBJECTS = 254  # instance ids 1..254 in an 8-bit PNG
 MAX_LOADED = 6     # YOLO models kept in memory, so several can run in one analysis
 LOCK = threading.Lock()
 _YOLO, _SAM, _INFO = OrderedDict(), {}, {}
+# Live progress of the running detection, read by /api/detect-status for the page's progress bar.
+# 'expected' = how long the same step took last time (seconds), so the bar can move inside a step.
+PROGRESS = {"state": "idle"}
+_LAST_SECONDS = {}
 
 
 def _threads():
@@ -229,7 +235,30 @@ NMS_IOU = 0.7          # Ultralytics / YoloTron default: close parallel strings 
 MIN_INSIDE_ROI = 0.25  # an object is kept when at least this share of its box lies inside the ROI
 
 
+def _stage(label, done, key):
+    PROGRESS.update(stage=label, done=done, stage_started=time.time(), expected=_LAST_SECONDS.get(key), key=key)
+
+
+def _stage_end():
+    if PROGRESS.get("key"):
+        _LAST_SECONDS[PROGRESS["key"]] = time.time() - PROGRESS["stage_started"]
+
+
 def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
+    """Runs _detect and keeps PROGRESS up to date (state running / done / error)."""
+    PROGRESS.clear()
+    PROGRESS.update(state="running", stage="Avvio", done=0, steps=len(model_ids) + (1 if use_sam else 0),
+                    started=time.time(), stage_started=time.time(), expected=None, key=None)
+    try:
+        out = _detect(img, model_ids, conf, use_sam, roi_box)
+        PROGRESS.update(state="done", done=PROGRESS["steps"])
+        return out
+    except Exception:
+        PROGRESS.update(state="error")
+        raise
+
+
+def _detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
     """img: PIL RGB (already EXIF-oriented). Returns (detections, instance PNG bytes, info).
 
     roi_box: (x0, y0, x1, y1) photo pixels of the operator's ROI, or None for the whole photo.
@@ -257,8 +286,9 @@ def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
     t0 = time.perf_counter()
     found = []  # (model_id, class_name, conf, box in photo px, full-photo mask or None)
     with LOCK:
-        for model_id in model_ids:
+        for k, model_id in enumerate(model_ids):
             meta = available[model_id]
+            _stage(f"YOLO {meta['name']} ({k + 1}/{len(model_ids)})", k, "yolo:" + model_id)
             m = _load_yolo(model_id)
             result = m.predict(photo, imgsz=meta["imgsz"], conf=conf, iou=NMS_IOU, max_det=MAX_OBJECTS,
                                device="cpu", verbose=False)[0]
@@ -273,6 +303,7 @@ def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
                         continue
                 found.append([model_id, meta["classes"].get(int(classes[i]), str(classes[i])), float(confs[i]),
                               b, None if seg is None else seg[i]])
+            _stage_end()
         found.sort(key=lambda f: -f[2])
         found = found[:MAX_OBJECTS]
         t_yolo = time.perf_counter() - t0
@@ -296,6 +327,7 @@ def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
         need_sam = [i for i, f in enumerate(found) if f[4] is None]
         sam_used = None
         if need_sam and use_sam:
+            _stage(f"SAM: contorni di {len(need_sam)} oggetti", len(model_ids), "sam")
             sam = _load_sam()
             sam_used = sam_path().name
             res = sam(img, bboxes=[found[i][3].tolist() for i in need_sam], verbose=False)[0]
@@ -306,6 +338,7 @@ def detect(img, model_ids, conf=0.25, use_sam=True, roi_box=None):
                     mask = np.asarray(Image.fromarray(mask).resize((w, h), Image.Resampling.NEAREST))
                 # SAM may leak outside the prompt box; the object cannot extend beyond it.
                 found[i][4] = mask & _box_mask(_grow(found[i][3], 0.03), h, w)
+            _stage_end()
     t_total = time.perf_counter() - t0
     instance = np.zeros((h, w), np.uint8)
     detections = []

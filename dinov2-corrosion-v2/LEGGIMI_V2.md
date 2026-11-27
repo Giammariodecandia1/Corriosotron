@@ -70,12 +70,15 @@ Un nuovo rilevamento azzera le correzioni, per esempio quando cambi la confidenz
 
 ## ROI automatica (senza disegnarla)
 
-Se nessuna ROI è disegnata a mano e almeno una classe è su **Analizza solo questo**, per esempio *Sostegni*, la ROI viene presa in automatico. È il riquadro del **sostegno principale** più gli oggetti "solo questo" che stanno per lo più dentro di lui, con un margine del 3%. Sulla foto compare tratteggiata.
+Se nessuna ROI è disegnata a mano e almeno una classe è su **Usa come ROI**, per esempio *Sostegno*, la ROI viene presa in automatico. È il riquadro del **sostegno principale**, con un margine del 3%. Sulla foto compare tratteggiata. Dentro la ROI l'analisi funziona come con una ROI disegnata a mano: la maschera del metallo decide cosa è traliccio, le classi su Escludi e le zone escluse a mano vengono tolte.
+
+**Usa come ROI** prende solo il riquadro dell'oggetto, non il suo contorno SAM. Su un traliccio a grigliato SAM disegna una sagoma piena, quindi per i sostegni questa è la scelta giusta (è il default del modello *Sostegni _ Targhette V1s*). **Analizza solo questo** usa invece il contorno SAM ed è adatto a oggetti pieni; se nessuna classe è su Usa come ROI, la ROI automatica nasce dal riquadro di questi oggetti.
 
 - **Come sceglie il sostegno principale:** prende quello con il riquadro più grande, pesato per la confidenza, cioè di solito quello in primo piano. I tralicci sullo sfondo restano fuori dalla ROI.
-- **Per cambiarlo:** tasto destro su un altro oggetto "solo questo", poi **Usa come ROI automatica**. Se togli il sostegno scelto, la ROI passa al successivo.
+- **Per cambiarlo:** tasto destro su un altro oggetto "Usa come ROI" o "solo questo", poi **Usa come ROI automatica**. Se togli il sostegno scelto, la ROI passa al successivo.
 - **Le classi su Escludi valgono anche dentro il sostegno.** Per esempio *Etichetta su Sostegno* e *Isolatori* vengono escluse anche se stanno dentro il riquadro del sostegno.
-- **La ROI disegnata a mano ha sempre la precedenza.** **Intera foto** disattiva la ROI automatica per quella foto. La casella **ROI automatica sugli oggetti «Analizza solo qui»**, nel pannello oggetti, la spegne del tutto.
+- **La ROI disegnata a mano ha sempre la precedenza.** **Intera foto** disattiva la ROI automatica per quella foto. Poi puoi disegnarne una a mano con **Seleziona ROI**. Gli oggetti su **Usa come ROI** danno sempre la ROI automatica, che compare subito dopo il riconoscimento; la casella **ROI automatica anche da «Analizza solo qui»** decide solo se, in loro assenza, la ROI nasce dagli oggetti «solo questo».
+- **Più sostegni nella foto:** viene scelto il più sicuro vicino al centro della foto; quelli molto più piccoli del più grande (tralicci sullo sfondo) non vengono scelti. Gli altri restano come riquadri grigi tratteggiati e non contano.
 
 Con la ROI automatica il rilevamento gira su tutta la foto, perché la ROI nasce proprio dai suoi risultati. La maschera di dettaglio BiRefNet invece si calcola solo nella ROI, quindi l'analisi resta veloce.
 
@@ -117,3 +120,12 @@ Prova del 24/11/2026 sulle foto DJI di esempio, con 16 isolatori:
 ## Modello attuale
 
 `Isolatori V1s.pt` viene da YoloTron: YOLO11s, 1 classe "Isolatori", imgsz 960.
+
+## Impostazioni salvate
+
+In alto, **Impostazione** e **💾 Salva…** salvano con un nome tutto ciò che non dipende dalla singola foto: modelli attivi e scelte per classe, confidenza, profilo colore, ROI automatica da «Analizza solo qui», esclusione cavi, larghezza dell'esclusione a mano, anomalie raggruppate, mappa del punto di scatto, risoluzione e modalità dei nuovi profili. ROI disegnata, esclusioni a mano e marker restano della singola foto.
+
+- Scegliendo un'impostazione dal menu viene applicata subito e, se c'è una foto aperta, il riconoscimento riparte.
+- Salvando con lo stesso nome l'impostazione viene aggiornata.
+- Se un modello o il profilo salvato non esiste più, il tool lo segnala e applica il resto.
+- I file stanno in `impostazioni/<nome>.json`: sono pensati per essere usati anche da un'analisi a lotti.

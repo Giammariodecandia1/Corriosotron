@@ -328,7 +328,7 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
     scope_label, scope_value = "Ambito: ", "metallo visibile nella foto / ROI"
     objects = (report.get("object_recognition") or {}).get("summary") or []
     if objects:  # automatic object recognition (v2): say what was removed or kept
-        words = {"exclude": "esclusi", "focus": "solo"}
+        words = {"exclude": "esclusi", "focus": "solo", "roi": "ROI su"}
         parts = [f'{words[o["mode"]]} {o["count_in_roi"]} {o["class_name"]}' for o in objects if o["mode"] in words]
         scope_value = "metallo visibile · " + ", ".join(parts[:3])
     if manual_n:

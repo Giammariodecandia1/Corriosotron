@@ -45,11 +45,27 @@ def starts(length, side, overlap):
     return sorted(set(list(range(0, length - side, step)) + [length - side]))
 
 
+def compact_starts(length, side, min_overlap):
+    """Fewest tiles that still overlap by min_overlap, spread evenly (measured 2026-11-27 on a 1961 x 3837
+    ROI: 8 tiles instead of 15, same metal area within 0.7%, differences only on edges and cables)."""
+    if length <= side:
+        return [0]
+    n = -(-(length - min_overlap) // (side - min_overlap))
+    return [round(i * (length - side) / (n - 1)) for i in range(n)]
+
+
+# V2_TILE_LAYOUT=classic keeps the old layout (overlap side/6, last tile flush to the edge).
+COMPACT = os.environ.get("V2_TILE_LAYOUT", "compact") != "classic"
+
+
 def plan(width, height):
     """Square tiles no larger than the model input, so nothing is downscaled."""
     side = int(min(MAX_SIDE, max(MIN_SIDE, min(width, height))))
     for _ in range(16):
-        xs, ys = starts(width, side, side // 6), starts(height, side, side // 6)
+        if COMPACT:
+            xs, ys = compact_starts(width, side, side // 16), compact_starts(height, side, side // 16)
+        else:
+            xs, ys = starts(width, side, side // 6), starts(height, side, side // 6)
         if len(xs) * len(ys) <= MAX_TILES:
             return side, xs, ys
         side = int(side * 1.25)  # very large ROI: accept coarser tiles, bounded CPU time
