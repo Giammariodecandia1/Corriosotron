@@ -1,0 +1,17 @@
+{
+  "id": "dji_m3t",
+  "nome": "DJI Mavic 3T (M3T) · camera grandangolare",
+  "make": "DJI",
+  "model": "M3T",
+  "image_source": "WideCamera",
+  "focal_mm": 4.4,
+  "sensor_w_mm": 6.4,
+  "native_w": 8000,
+  "native_h": 6000,
+  "has_rtk": true,
+  "has_lrf": true,
+  "lrf_range_m": [3, 1200],
+  "sigma_gimbal_deg": 1.0,
+  "sigma_focal_rel": 0.02,
+  "calibrazione": null
+}

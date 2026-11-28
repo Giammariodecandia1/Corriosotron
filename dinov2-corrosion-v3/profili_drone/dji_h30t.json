@@ -1,0 +1,17 @@
+{
+  "id": "dji_h30t",
+  "nome": "DJI Zenmuse H30T · camera grandangolare",
+  "make": "DJI",
+  "model": "H30T",
+  "image_source": "WideCamera",
+  "focal_mm": 6.72,
+  "sensor_w_mm": 9.6,
+  "native_w": 8064,
+  "native_h": 6048,
+  "has_rtk": true,
+  "has_lrf": true,
+  "lrf_range_m": [3, 3000],
+  "sigma_gimbal_deg": 1.0,
+  "sigma_focal_rel": 0.02,
+  "calibrazione": null
+}

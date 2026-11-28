@@ -1,0 +1,6 @@
+{
+  "description": "Isolatori V1 (YOLO11s, YoloTron)",
+  "enabled": true,
+  "default_modes": {"Isolatori": "exclude"},
+  "imgsz": 960
+}

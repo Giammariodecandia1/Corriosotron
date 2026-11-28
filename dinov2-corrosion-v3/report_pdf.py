@@ -1,0 +1,458 @@
+"""One-page A4 visual inspection report for the analysed ROI.
+
+Layout follows the reference "Report Ispezione Corrosione.pdf": header card with
+status pill, four-column info strip, two image panels, summary card, operator
+notes card and a footer with the AI disclaimer pill and company name.
+Measurements below are distances from the top of the page, in points.
+"""
+import io
+from reportlab.lib.colors import HexColor
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader, simpleSplit
+from reportlab.pdfgen import canvas
+
+PW, PH = A4
+L, R = 45, PW - 45
+W = R - L
+NAVY, BLUE, PALE = HexColor("#102B43"), HexColor("#147EAE"), HexColor("#EEF6FA")
+INK, MUTED, RULE = HexColor("#193244"), HexColor("#587080"), HexColor("#D6E3E9")
+CYAN, LIGHT, WHITE = HexColor("#3BBBE8"), HexColor("#C7DDE9"), HexColor("#FFFFFF")
+STRIP, PILL_BG, PILL_LINE = HexColor("#F7FAFC"), HexColor("#1B3550"), HexColor("#4A6378")
+SEPARATOR = HexColor("#2A4A62")
+GREEN, GREEN_DOT = HexColor("#1F7A4D"), HexColor("#22A060")
+GREEN_BG, GREEN_LINE = HexColor("#E9F8EF"), HexColor("#B8E6CB")
+AMBER, RED = HexColor("#F9CA3D"), HexColor("#EE3E58")
+
+
+def T(top):
+    """PDF y coordinate for a distance from the top of the page."""
+    return PH - top
+
+
+def line(c, value, x, y, width, size=9, bold=False, color=INK, mono=False):
+    font = "Courier" if mono else ("Helvetica-Bold" if bold else "Helvetica")
+    value = str(value or "")
+    while value and c.stringWidth(value, font, size) > width:
+        value = value[:-2]
+    c.setFont(font, size)
+    c.setFillColor(color)
+    c.drawString(x, y, value)
+
+
+def pair(c, label, value, x, y, size=8, width=200):
+    """Muted label followed by a bold value on the same baseline."""
+    c.setFont("Helvetica", size)
+    c.setFillColor(LIGHT)
+    c.drawString(x, y, label)
+    line(c, value, x + c.stringWidth(label, "Helvetica", size), y, width, size, True, WHITE)
+
+
+def pct(value):
+    return "n/d" if value is None else f"{value:.1f}%".replace(".", ",")
+
+
+def image_data(image):
+    image = image.convert("RGB")
+    image.thumbnail((1400, 1400))
+    data = io.BytesIO()
+    image.save(data, format="JPEG", quality=88)
+    data.seek(0)
+    return data
+
+
+def header(c, title, subtitle):
+    """Header card with left accent bar and status pill (top 45-110)."""
+    c.setFillColor(NAVY)
+    c.roundRect(L, T(110), W, 65, 6, fill=1, stroke=0)
+    c.setFillColor(BLUE)
+    c.rect(L, T(110), 4, 65, fill=1, stroke=0)
+    line(c, "EAGLE PROJECTS • RUSTRON / CORROSION INTELLIGENCE", L + 18, T(66), 330, 8, True, CYAN)
+    line(c, title, L + 18, T(85), 330, 19, True, WHITE)
+    line(c, subtitle, L + 18, T(99), 330, 9, False, LIGHT)
+    pill_w = 142
+    pill_x = R - 12 - pill_w
+    c.setFillColor(PILL_BG)
+    c.setStrokeColor(PILL_LINE)
+    c.roundRect(pill_x, T(88), pill_w, 21, 10.5, fill=1, stroke=1)
+    c.setFont("Helvetica-Bold", 7.5)
+    c.setFillColor(HexColor("#E6F1F7"))
+    c.drawCentredString(pill_x + pill_w / 2, T(77.5) - 2.6, "ISPEZIONE STRUTTURALE")
+
+
+def footer(c, page_label=""):
+    """Rule, AI pill, optional page label and company name (top 782-812)."""
+    c.setStrokeColor(RULE)
+    c.line(L, T(782), R, T(782))
+    pill_text = "Rustron / Corrosion Intelligence · Analisi AI visiva da modelli interni."
+    footer_w = c.stringWidth(pill_text, "Helvetica-Bold", 8) + 30
+    c.setFillColor(GREEN_BG)
+    c.setStrokeColor(GREEN_LINE)
+    c.roundRect(L, T(812), footer_w, 18, 9, fill=1, stroke=1)
+    c.setFillColor(GREEN_DOT)
+    c.circle(L + 10, T(803), 2.5, fill=1, stroke=0)
+    line(c, pill_text, L + 18, T(806), footer_w - 24, 8, True, GREEN)
+    c.setFillColor(MUTED)
+    if page_label:
+        c.setFont("Helvetica", 7.5)
+        c.drawCentredString(PW / 2 + 60, T(806), page_label)
+    c.setFont("Helvetica", 8.5)
+    c.drawRightString(R, T(806), "Eagle Projects S.p.A.")
+
+
+MAP_MIN_H = 175   # below this the map box would be too small to read
+
+
+def map_box(c, x, top, w, h, info):
+    """Shooting point: OpenStreetMap extract with the pin, EXIF coordinates and a Google Maps link."""
+    c.setFillColor(PALE)
+    c.roundRect(x, T(top + h), w, h, 6, fill=1, stroke=0)
+    line(c, "POSIZIONE DELLO SCATTO", x + 9, T(top + 15), w - 18, 7.5, True, NAVY)
+    area_top, area_h = top + 23, h - 23 - 38
+    image = info.get("image")
+    if image is not None:
+        iw, ih = image.size
+        scale = min((w - 16) / iw, area_h / ih)
+        dw, dh = iw * scale, ih * scale
+        c.drawImage(ImageReader(image_data(image)), x + (w - dw) / 2, T(area_top + area_h) + (area_h - dh) / 2, dw, dh)
+    else:
+        c.setStrokeColor(RULE)
+        c.rect(x + 8, T(area_top + area_h), w - 16, area_h, fill=0, stroke=1)
+        for n, part in enumerate(simpleSplit("Mappa non disponibile: " + (info.get("note") or "") + ". Usa il link qui sotto.", "Helvetica", 7.5, w - 32)[:4]):
+            line(c, part, x + 16, T(area_top + area_h / 2 - 10 + 10 * n), w - 32, 7.5, color=MUTED)
+    line(c, "Coordinate (GPS della foto): " + (info.get("coordinates") or ""), x + 9, T(top + h - 24), w - 18, 7.5, color=INK)
+    label = "Apri il punto in Google Maps »"
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(BLUE)
+    lx, ly = x + 9, T(top + h - 10)
+    c.drawString(lx, ly, label)
+    lw = c.stringWidth(label, "Helvetica-Bold", 8)
+    c.setStrokeColor(BLUE)
+    c.setLineWidth(0.6)
+    c.line(lx, ly - 1.5, lx + lw, ly - 1.5)
+    c.setLineWidth(1)
+    c.linkURL(info["url"], (lx, ly - 3, lx + lw, ly + 9), relative=0, thickness=0)
+
+
+BAND_COLORS = {"rilevante": RED, "da monitorare": HexColor("#D79A00")}
+BAND_LABELS = {"rilevante": "Rilevante", "da monitorare": "Da monitorare"}
+MAX_TABLE_ROWS = 30
+
+
+def anomalies_page(c, photo_name, classified_image, clusters, shot_map=None):
+    """Page 2: classification map with numbered anomaly boxes and the anomaly table.
+    With `shot_map`, the map of the shooting point goes in the free space under the table when it
+    fits. Returns True when it was placed there."""
+    found = clusters.get("clusters") or []
+    header(c, "Anomalie numerate", f"{len(found)} sopra soglia  ·  {photo_name or ''}")
+    iw, ih = classified_image.size
+    top = 125
+    if iw / ih > 0.9:   # wide map: full width on top, table below
+        bx, btop, bw, bh = L, top, W, 330
+        table_x, table_top, table_w = L, top + bh + 16, W
+    else:               # tall map (typical tower crop): map left, table right
+        bx, btop, bw, bh = L, top, 250, 645
+        table_x, table_top, table_w = L + 264, top, W - 264
+
+    c.setFillColor(PALE)
+    c.roundRect(bx, T(btop + bh), bw, bh, 6, fill=1, stroke=0)
+    scale = min((bw - 12) / iw, (bh - 12) / ih)
+    dw, dh = iw * scale, ih * scale
+    ox, oy = bx + (bw - dw) / 2, btop + (bh - dh) / 2   # image left, image top
+    c.drawImage(ImageReader(image_data(classified_image)), ox, T(oy + dh), dw, dh)
+    for cl in reversed(found):   # A1 drawn last, on top
+        x0, y0, x1, y1 = cl["bbox_px"]
+        rx, ry = ox + x0 * scale, oy + y0 * scale
+        rw, rh = max((x1 - x0) * scale, 4), max((y1 - y0) * scale, 4)
+        color = BAND_COLORS[cl["band"]]
+        for width, stroke in ((2.6, WHITE), (1.2, color)):
+            c.setLineWidth(width)
+            c.setStrokeColor(stroke)
+            c.rect(rx, T(ry + rh), rw, rh, fill=0, stroke=1)
+        c.setFont("Helvetica-Bold", 6.5)
+        tw = c.stringWidth(cl["id"], "Helvetica-Bold", 6.5) + 5
+        tag_top = ry - 9 if ry - 9 >= oy else ry
+        c.setFillColor(color)
+        c.rect(rx, T(tag_top + 9), tw, 9, fill=1, stroke=0)
+        c.setFillColor(WHITE)
+        c.drawString(rx + 2.5, T(tag_top + 6.6), cl["id"])
+    c.setLineWidth(1)
+
+    # Table: ID, band, % of visible metal, % intense, extent on tower height.
+    base = (26, 66, 48, 48, 53)
+    widths = [w * table_w / sum(base) for w in base]
+    heads = ("ID", "FASCIA", "% METALLO", "% INTENSA", "ESTENSIONE")
+    c.setFillColor(PALE)
+    c.rect(table_x, T(table_top + 16), table_w, 16, fill=1, stroke=0)
+    x = table_x
+    for head, width in zip(heads, widths):
+        line(c, head, x + 4, T(table_top + 11), width - 6, 6.6, True, NAVY)
+        x += width
+    rows_fit = int((770 - table_top - 16 - 44) // 14)
+    shown = found[:max(0, min(MAX_TABLE_ROWS, rows_fit))]
+    y = table_top + 16
+    for cl in shown:
+        cells = (cl["id"], None, pct(cl["pct_of_visible_metal"]), pct(cl["intense_pct_of_anomaly"]),
+                 pct(cl["extent_pct_of_tower_height"]) + " alt.")
+        x = table_x
+        for n, (value, width) in enumerate(zip(cells, widths)):
+            if n == 1:
+                label_text = BAND_LABELS[cl["band"]]
+                pw = c.stringWidth(label_text, "Helvetica-Bold", 6.3) + 8
+                c.setFillColor(BAND_COLORS[cl["band"]])
+                c.roundRect(x + 3, T(y + 11.5), pw, 9, 4.5, fill=1, stroke=0)
+                line(c, label_text, x + 7, T(y + 9.3), width - 8, 6.3, True, WHITE)
+            else:
+                line(c, value, x + 4, T(y + 10), width - 6, 7.5, n == 0, INK)
+            x += width
+        y += 14
+        c.setStrokeColor(RULE)
+        c.line(table_x, T(y), table_x + table_w, T(y))
+    if not found:
+        line(c, "Nessuna anomalia sopra soglia.", table_x + 4, T(y + 14), table_w - 8, 8.5, True, INK)
+        y += 18
+    if len(found) > len(shown):
+        line(c, f"Altre {len(found) - len(shown)} anomalie sopra soglia nel JSON / CSV.",
+             table_x + 4, T(y + 13), table_w - 8, 7.5, True, INK)
+        y += 14
+
+    thresholds = clusters.get("thresholds_pct_of_visible_metal") or {}
+    legend = (f"Fasce: Rilevante almeno {pct(thresholds.get('rilevante'))} del metallo visibile; "
+              f"Da monitorare almeno {pct(thresholds.get('da monitorare'))}. "
+              f"Zone più piccole senza ID: {clusters.get('below_threshold_count', 0)}. "
+              f"Frammenti uniti entro {clusters.get('merge_distance_px') or 0} px "
+              f"(1% dell'estensione del traliccio). "
+              "Estensione = altezza dell'anomalia in % dell'altezza del traliccio inquadrato. "
+              "ID numerati per grandezza: A1 è la più estesa.")
+    parts = simpleSplit(legend, "Helvetica", 7, table_w - 8)[:6]
+    for n, part in enumerate(parts):
+        line(c, part, table_x + 4, T(y + 16 + 10 * n), table_w - 8, 7, color=MUTED)
+    free_top = y + 16 + 10 * len(parts) + 12
+    if shot_map and 770 - free_top >= MAP_MIN_H:
+        image = shot_map.get("image")
+        needed = 23 + 38 + 6 + ((table_w - 16) * image.size[1] / image.size[0] if image is not None else 120)
+        h = max(MAP_MIN_H, min(770 - free_top, needed))
+        map_box(c, table_x, free_top, table_w, h, shot_map)
+        return True
+    return False
+
+
+def _num(v, dec=2):
+    return f"{v:.{dec}f}".replace(".", ",")
+
+
+def valore_misura(valore, u95, unita):
+    """Testo «valore ± U95 unità»: aree in m² con 2 decimali, lunghezze in m o in cm se sotto 1 m."""
+    if unita == "m" and valore < 1:
+        return f"{_num(valore * 100, 0)} ± {_num(u95 * 100, 0)} cm"
+    if unita == "m²" and valore < 0.1:
+        return f"{_num(valore * 1e4, 0)} ± {_num(u95 * 1e4, 0)} cm²"
+    return f"{_num(valore)} ± {_num(u95)} {unita}"
+
+
+ESITO_COLORE = {"STIMA": HexColor("#A07800"), "VALIDATA": GREEN, "NON VALIDATA": HexColor("#B8243A")}
+SPIEGAZIONE_MISURE = ("Area vista = ruggine visibile proiettata sulla faccia del sostegno. Superficie reale stimata = "
+                      "area vista × fattore di sviluppo dei profilati (parti nascoste supposte come quelle visibili): "
+                      "sempre STIMA.")
+
+
+def misure_page(c, photo_name, misure, info=None, controlli=None):
+    """Optional page with the measurements the operator ticked for the report (Rustron v3)."""
+    header(c, "Misure", photo_name or "")
+    cols = (L + 8, L + 190, L + 330, R - 8)
+    top = 140
+    c.setFillColor(STRIP)
+    c.setStrokeColor(RULE)
+    c.roundRect(L, T(top + 8), W, 22, 4, fill=1, stroke=1)
+    for x, titolo in zip(cols[:3], ("MISURA", "VALORE ± U95 (k=2)", "SUPERFICIE REALE STIMATA")):
+        line(c, titolo, x, T(top + 1), 170, 7, True, MUTED)
+    c.setFont("Helvetica-Bold", 7)
+    c.setFillColor(MUTED)
+    c.drawRightString(cols[3], T(top + 1), "ESITO")
+    y = top + 26
+    for m in misure:
+        if y > 640:
+            break  # al massimo ~28 righe: le altre restano nel JSON
+        nome = m.get("nome", "")
+        extra = m.get("extra") or {}
+        if m.get("tipo") == "anomalia" and extra.get("lunghezza_m") is not None:
+            nome += (f" ({_num(extra['lunghezza_m'] * 100, 0)} ± {_num(extra.get('u95_lunghezza_m', 0) * 100, 0)} × "
+                     f"{_num(extra['larghezza_m'] * 100, 0)} ± {_num(extra.get('u95_larghezza_m', 0) * 100, 0)} cm)")
+        line(c, nome, cols[0], T(y), 178, 8.5, True)
+        line(c, valore_misura(m.get("valore", 0.0), m.get("u95", 0.0), m.get("unita", "")), cols[1], T(y), 136, 8.5)
+        if m.get("tipo") == "classe" and "reale_m2" in extra:
+            line(c, f"{_num(extra['reale_m2'])} ± {_num(extra.get('u95_reale_m2', 0.0))} m² (STIMA)", cols[2], T(y), 120, 8)
+        etichetta = m.get("etichetta", "")
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(ESITO_COLORE.get(etichetta, INK))
+        c.drawRightString(cols[3], T(y), etichetta)
+        c.setStrokeColor(RULE)
+        c.line(L, T(y + 6), R, T(y + 6))
+        y += 18
+    y += 10
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(MUTED)
+    for riga in simpleSplit(SPIEGAZIONE_MISURE, "Helvetica", 7.5, W):
+        c.drawString(L, T(y), riga)
+        y += 10
+    if info:
+        y += 6
+        fonte = {"laser": "telemetro laser", "geometria": "geometria (gimbal e quota)",
+                 "tie point": "tie point su più foto"}.get(info.get("fonte_distanza"), info.get("fonte_distanza") or "")
+        dati = [("Drone", info.get("drone")), ("Posizione", info.get("rtk")), ("Distanza", fonte + (
+            f" · {_num(info['distanza_m'], 1)} m" if info.get("distanza_m") is not None else ""))]
+        for label, value in dati:
+            if value:
+                line(c, label.upper(), L, T(y), 80, 7, True, MUTED)
+                line(c, value, L + 80, T(y), W - 80, 8.5)
+                y += 13
+    for ctl in controlli or []:
+        line(c, ("OK  " if ctl.get("ok") else "NO  ") + ctl.get("testo", "").replace("≥", ">="), L, T(y), W, 8,
+             color=GREEN if ctl.get("ok") else HexColor("#B8243A"))
+        y += 12
+
+
+def build_pdf(photo_name, roi_image, classified_image, report, operator_notes="", clusters=None, shot_map=None,
+              misure=None, misure_info=None, misure_controlli=None):
+    """Return the PDF. Page 1 always; page 2 (numbered anomalies) only when `clusters`
+    is given, i.e. the operator ticked "Clusterizza anomalie". Date and GPS are read
+    from the photo metadata (report["shot_captured_at"], report["shot_coordinates"])."""
+    out = io.BytesIO()
+    c = canvas.Canvas(out, pagesize=A4)
+    c.setTitle("Rustron / Corrosion Intelligence - ispezione corrosione")
+    c.setAuthor("Eagle Projects")
+    header(c, "Analisi visiva della corrosione", "Sostegni metallici AT / AAT")
+
+    # Information strip: photo, coordinates, profile, date/time.
+    c.setFillColor(STRIP)
+    c.setStrokeColor(RULE)
+    c.roundRect(L, T(172), W, 50, 5, fill=1, stroke=1)
+    line(c, "FOTOGRAFIA", L + 12, T(134), 120, 7, True, MUTED)
+    line(c, photo_name or "Non indicata", L + 12, T(157), 228, 7.2, color=BLUE, mono=True)
+    line(c, "COORDINATE", L + 252, T(134), 80, 7, True, MUTED)
+    lat_text, _, lon_text = (report.get("shot_coordinates") or "").partition(", ")
+    line(c, lat_text, L + 252, T(157), 86, 8, True)
+    line(c, lon_text, L + 252, T(167), 86, 8, True)
+    line(c, "PROFILO", L + 338, T(134), 80, 7, True, MUTED)
+    line(c, report.get("profile_name") or "Non indicato", L + 338, T(157), 80, 8.5, True)
+    c.setFont("Helvetica", 7)
+    c.setFillColor(MUTED)
+    c.drawRightString(R - 12, T(134), "DATA / ORA")
+    c.setFont("Helvetica", 8)
+    c.drawRightString(R - 12, T(157), report.get("shot_captured_at") or "")
+
+    # Image panels: analysed ROI and classification map.
+    gap, panel_top, panel_h, head_h = 12, 184, 382, 23
+    box_w = (W - gap) / 2
+    panels = ((roi_image, "FOTOGRAFIA / AREA ANALIZZATA"),
+              (classified_image, "MAPPA DI CLASSIFICAZIONE"))
+    # Legend of the excluded zones (automatic = model, manual = drawn by the operator), only when present.
+    auto_px = (report.get("object_recognition") or {}).get("excluded_pixels_in_roi") or 0
+    manual = report.get("insulator_exclusions") or {}
+    manual_n = len(manual.get("regions") or [])
+    legend = []
+    if auto_px:
+        legend.append((HexColor("#547EFF"), "Esclusi dal modello (YOLO)"))
+    if manual_n:
+        legend.append((HexColor("#28BEFF"), f"Esclusi a mano ({manual_n})"))
+    cables_n = (report.get("cable_exclusion") or {}).get("cables") or 0
+    if cables_n:
+        legend.append((HexColor("#BE46FF"), f"Cavi esclusi ({cables_n})"))
+    for index, (image, title) in enumerate(panels):
+        x = L + index * (box_w + gap)
+        c.setFillColor(PALE)
+        c.roundRect(x, T(panel_top + panel_h), box_w, panel_h, 6, fill=1, stroke=0)
+        line(c, title, x + 9, T(panel_top + 15), box_w - 18, 7.5, True, NAVY)
+        area_top = panel_top + head_h + 6
+        area_h = panel_h - head_h - 12 - (14 if legend and index == 1 else 0)
+        if legend and index == 1:
+            lx = x + 9
+            for color, text in legend:
+                c.setFillColor(color)
+                c.rect(lx, T(panel_top + panel_h - 9), 8, 8, fill=1, stroke=0)
+                line(c, text, lx + 11, T(panel_top + panel_h - 7.5), 120, 6.8, False, INK)
+                lx += 11 + c.stringWidth(text, "Helvetica", 6.8) + 10
+        iw, ih = image.size
+        scale = min((box_w - 16) / iw, area_h / ih)
+        dw, dh = iw * scale, ih * scale
+        c.drawImage(ImageReader(image_data(image)), x + (box_w - dw) / 2,
+                    T(area_top + area_h) + (area_h - dh) / 2, dw, dh)
+
+    # Summary card: corrosion share of the visible metal and its classes.
+    top = 577
+    classes = report.get("class_pct_of_visible_metal") or {}
+    calibrated = set(report.get("calibrated_classes") or ())
+    c.setFillColor(NAVY)
+    c.roundRect(L, T(top + 118), W, 118, 6, fill=1, stroke=0)
+    c.setFillColor(BLUE)
+    c.rect(L, T(top + 3), W, 3, fill=1, stroke=0)
+    line(c, "METALLO VISIBILE CLASSIFICATO CON RUGGINE", L + 18, T(top + 22), W - 36, 8, True, LIGHT)
+    line(c, pct(report.get("corrosion_pct_of_visible_metal")), L + 18, T(top + 58), 230, 30, True, WHITE)
+    line(c, "Totale superficie affetta da ruggine", L + 18, T(top + 77), 230, 8.5, color=LIGHT)
+    for x_offset, title, key, color in ((376, "MEDIA", "medium", AMBER),
+                                        (445, "INTENSA", "intense", RED)):
+        x = L + x_offset
+        c.setFillColor(color)
+        c.circle(x, T(top + 40), 3.5, fill=1, stroke=0)
+        line(c, title, x + 9, T(top + 44), 90, 8, True, LIGHT)
+        if key in calibrated:
+            line(c, pct(classes.get(key)), x, T(top + 67), 130, 15, True, WHITE)
+        else:
+            line(c, "Non calibrata", x, T(top + 67), 130, 9, True, WHITE)
+    c.setStrokeColor(SEPARATOR)
+    c.line(L + 18, T(top + 90), R - 18, T(top + 90))
+    pair(c, "Zone da verificare: ", pct(classes.get("uncertain")), L + 18, T(top + 107))
+    scope_label, scope_value = "Ambito: ", "metallo visibile nella foto / ROI"
+    objects = (report.get("object_recognition") or {}).get("summary") or []
+    if objects:  # automatic object recognition (v2): say what was removed or kept
+        words = {"exclude": "esclusi", "focus": "solo", "roi": "ROI su"}
+        parts = [f'{words[o["mode"]]} {o["count_in_roi"]} {o["class_name"]}' for o in objects if o["mode"] in words]
+        scope_value = "metallo visibile · " + ", ".join(parts[:3])
+    if manual_n:
+        scope_value += f" · {manual_n} zone escluse a mano"
+    cables_found = (report.get("cable_exclusion") or {}).get("cables") or 0
+    if cables_found:
+        scope_value += f" · {cables_found} cavi esclusi"
+    c.setFont("Helvetica", 8)
+    while c.stringWidth(scope_value, "Helvetica-Bold", 8) > 320:
+        scope_value = scope_value[:-2]
+    scope_w = c.stringWidth(scope_label, "Helvetica", 8) + c.stringWidth(scope_value, "Helvetica-Bold", 8)
+    pair(c, scope_label, scope_value, R - 18 - scope_w, T(top + 107), width=330)
+
+    # Operator notes card.
+    notes_top = 705
+    c.setStrokeColor(RULE)
+    c.roundRect(L, T(notes_top + 58), W, 58, 6, fill=0, stroke=1)
+    line(c, "NOTE DELL'OPERATORE", L + 12, T(notes_top + 16), W - 24, 7.5, True, NAVY)
+    note_lines = simpleSplit((operator_notes or "").strip(), "Helvetica", 8.5, W - 24)[:2]
+    for n, note in enumerate(note_lines):
+        line(c, note, L + 12, T(notes_top + 31 + 14 * n), W - 24, 8.5)
+    if not note_lines:
+        c.setStrokeColor(RULE)
+        c.line(L + 12, T(notes_top + 35), R - 12, T(notes_top + 35))
+        c.line(L + 12, T(notes_top + 50), R - 12, T(notes_top + 50))
+
+    # Optional map of the shooting point: in the free space of the anomalies page when it fits,
+    # otherwise on a page of its own. Never present unless the operator asked for it.
+    map_on_anomalies = bool(shot_map and clusters and anomalies_page(canvas.Canvas(io.BytesIO(), pagesize=A4), photo_name, classified_image, clusters, shot_map))
+    pages = 1 + (1 if clusters else 0) + (1 if shot_map and not map_on_anomalies else 0) + (1 if misure else 0)
+    footer(c, f"Pag. 1/{pages}" if pages > 1 else "")
+    c.showPage()
+    page = 1
+    if clusters:
+        page += 1
+        anomalies_page(c, photo_name, classified_image, clusters, shot_map if map_on_anomalies else None)
+        footer(c, f"Pag. {page}/{pages}")
+        c.showPage()
+    if shot_map and not map_on_anomalies:
+        page += 1
+        header(c, "Posizione dello scatto", f"{photo_name or ''}")
+        map_box(c, L, 125, W, 420, shot_map)
+        footer(c, f"Pag. {page}/{pages}")
+        c.showPage()
+    if misure:
+        page += 1
+        misure_page(c, photo_name, misure, misure_info, misure_controlli)
+        footer(c, f"Pag. {page}/{pages}")
+        c.showPage()
+    c.save()
+    return out.getvalue()
