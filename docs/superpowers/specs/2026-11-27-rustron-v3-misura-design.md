@@ -1,6 +1,11 @@
 # Rustron v3: misurare aree e lunghezze in metri e centimetri
 
-Data: 2026-11-27. Stato: bozza da approvare.
+Data: 2026-11-27. Stato: realizzato.
+
+> **Aggiornamento 2026-11-28:** il livello 1 (stima da una foto sola) è stato **tolto** su richiesta dell'utente.
+> Sul traliccio reale 23341A1-074 (Codrongianos, foto da ovest e da est) la faccia era ruotata di 45–50° rispetto
+> alla visuale e la stima sbagliava del 20–30 %, oltre l'incertezza dichiarata; la sessione multi-foto sullo stesso
+> traliccio coincide invece con il telemetro laser. Le misure si fanno solo con la sessione multi-foto.
 Bozza grafica di riferimento: `.superpowers/brainstorm/misura-v3-bozza-1.html` (approvata dall'utente come direzione).
 
 ## 1. Perché

@@ -1,4 +1,7 @@
-"""Endpoint /api/misura/*: stima da una foto, sessione multi-foto, PDF con le misure.
+"""Endpoint /api/misura/*: sessione multi-foto con tie point e PDF con le misure.
+
+Le misure in metri si fanno solo con la sessione (almeno 2 foto dello stesso sostegno da direzioni diverse):
+la stima da una foto sola supponeva la faccia frontale e sbagliava del 20–30 % sulle facce oblique.
 
 Le analisi vivono in memoria (``analisi``: result_id → dati dell'analisi, le ultime 5). Se un'analisi non
 c'è più, si risponde 404 e si chiede di ripeterla: niente risultati ricostruiti a metà.
@@ -14,7 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from . import drone, misure, sessione, stima_foto
+from . import misure, sessione
 
 MAX_FOTO = 40 * 1024 * 1024
 FATTORE = Field(misure.FATTORE_SVILUPPO, gt=0, le=10)
@@ -29,15 +32,6 @@ def _sha(v: str) -> str:
 class Forma(BaseModel):
     nome: str
     punti: list[list[float]]
-
-
-class RichiestaStima(BaseModel):
-    result_id: str
-    supporto_box: Optional[list[float]] = None
-    base_px: Optional[list[float]] = None
-    linee: list[Forma] = Field(default_factory=list)
-    aree: list[Forma] = Field(default_factory=list)
-    fattore: float = FATTORE
 
 
 class RichiestaSessione(BaseModel):
@@ -104,23 +98,6 @@ def crea_router(analisi, cartella: Path = sessione.CARTELLA) -> APIRouter:
         if s is None:
             raise HTTPException(404, "Sessione di misura non trovata: riaprila dal pannello Misura")
         return s
-
-    def proiettore_stima(e, box, base):
-        chiave = (tuple(box) if box else None, tuple(base) if base else None)
-        cache = e.setdefault("_proiettori", {})
-        if chiave not in cache:
-            meta = drone.leggi_foto(e["meta_bytes"], e["analysed_size"])
-            cache[chiave] = stima_foto.costruisci(meta, drone.scegli_profilo(meta), box, base)
-        return cache[chiave]
-
-    @r.post("/stima")
-    async def stima(req: RichiestaStima):
-        e = voce(req.result_id)
-        pr = await asyncio.to_thread(proiettore_stima, e, req.supporto_box, req.base_px)
-        if isinstance(pr, stima_foto.NessunaStima):
-            return {"nessuna_stima": {"motivo": pr.motivo, "suggerimento": pr.suggerimento}}
-        out = await asyncio.to_thread(_tutte, pr, e, req.linee, req.aree, req.fattore)
-        return {"info": pr.info, "etichetta": pr.etichetta, "misure": out}
 
     @r.post("/sessione/apri")
     async def apri(req: RichiestaSessione):

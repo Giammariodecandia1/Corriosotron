@@ -252,12 +252,21 @@ def valore_misura(valore, u95, unita):
 ESITO_COLORE = {"STIMA": HexColor("#A07800"), "VALIDATA": GREEN, "NON VALIDATA": HexColor("#B8243A")}
 SPIEGAZIONE_MISURE = ("Area vista = ruggine visibile proiettata sulla faccia del sostegno. Superficie reale stimata = "
                       "area vista × fattore di sviluppo dei profilati (parti nascoste supposte come quelle visibili): "
-                      "sempre STIMA.")
+                      "sempre STIMA. «parz. X%» = quota della zona che non cade sulla faccia del sostegno (sopra "
+                      "l'orizzonte o troppo lontana): non misurata.")
 
 
-def misure_page(c, photo_name, misure, info=None, controlli=None):
-    """Optional page with the measurements the operator ticked for the report (Rustron v3)."""
-    header(c, "Misure", photo_name or "")
+RIGHE_MISURE = 27  # righe per pagina; le misure in più vanno sulle pagine seguenti
+
+
+def pagine_misure(misure):
+    return [misure[i:i + RIGHE_MISURE] for i in range(0, len(misure), RIGHE_MISURE)]
+
+
+def misure_page(c, photo_name, misure, info=None, controlli=None, segue=False, ultima=True):
+    """Page with the measurements the operator ticked for the report (Rustron v3). With many measurements the
+    table continues on more pages (``segue``); notes, drone data and checks only on the ``ultima`` one."""
+    header(c, "Misure (segue)" if segue else "Misure", photo_name or "")
     cols = (L + 8, L + 190, L + 330, R - 8)
     top = 140
     c.setFillColor(STRIP)
@@ -269,18 +278,21 @@ def misure_page(c, photo_name, misure, info=None, controlli=None):
     c.setFillColor(MUTED)
     c.drawRightString(cols[3], T(top + 1), "ESITO")
     y = top + 26
-    for m in misure:
-        if y > 640:
-            break  # al massimo ~28 righe: le altre restano nel JSON
+    for m in misure[:RIGHE_MISURE]:
         nome = m.get("nome", "")
         extra = m.get("extra") or {}
         if m.get("tipo") == "anomalia" and extra.get("lunghezza_m") is not None:
             nome += (f" ({_num(extra['lunghezza_m'] * 100, 0)} ± {_num(extra.get('u95_lunghezza_m', 0) * 100, 0)} × "
                      f"{_num(extra['larghezza_m'] * 100, 0)} ± {_num(extra.get('u95_larghezza_m', 0) * 100, 0)} cm)")
         line(c, nome, cols[0], T(y), 178, 8.5, True)
-        line(c, valore_misura(m.get("valore", 0.0), m.get("u95", 0.0), m.get("unita", "")), cols[1], T(y), 136, 8.5)
+        testo = valore_misura(m.get("valore", 0.0), m.get("u95", 0.0), m.get("unita", ""))
+        if extra.get("errore"):
+            testo = "non misurabile"
+        elif extra.get("non_misurabile_pct"):
+            testo += f" (parz. {_num(extra['non_misurabile_pct'], 0)}%)"
+        line(c, testo, cols[1], T(y), 136, 8.5)
         if m.get("tipo") == "classe" and "reale_m2" in extra:
-            line(c, f"{_num(extra['reale_m2'])} ± {_num(extra.get('u95_reale_m2', 0.0))} m² (STIMA)", cols[2], T(y), 120, 8)
+            line(c, valore_misura(extra["reale_m2"], extra.get("u95_reale_m2", 0.0), "m²") + " (STIMA)", cols[2], T(y), 120, 8)
         etichetta = m.get("etichetta", "")
         c.setFont("Helvetica-Bold", 8)
         c.setFillColor(ESITO_COLORE.get(etichetta, INK))
@@ -288,6 +300,8 @@ def misure_page(c, photo_name, misure, info=None, controlli=None):
         c.setStrokeColor(RULE)
         c.line(L, T(y + 6), R, T(y + 6))
         y += 18
+    if not ultima:
+        return
     y += 10
     c.setFont("Helvetica", 7.5)
     c.setFillColor(MUTED)
@@ -434,7 +448,7 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
     # Optional map of the shooting point: in the free space of the anomalies page when it fits,
     # otherwise on a page of its own. Never present unless the operator asked for it.
     map_on_anomalies = bool(shot_map and clusters and anomalies_page(canvas.Canvas(io.BytesIO(), pagesize=A4), photo_name, classified_image, clusters, shot_map))
-    pages = 1 + (1 if clusters else 0) + (1 if shot_map and not map_on_anomalies else 0) + (1 if misure else 0)
+    pages = 1 + (1 if clusters else 0) + (1 if shot_map and not map_on_anomalies else 0) + len(pagine_misure(misure or []))
     footer(c, f"Pag. 1/{pages}" if pages > 1 else "")
     c.showPage()
     page = 1
@@ -449,9 +463,10 @@ def build_pdf(photo_name, roi_image, classified_image, report, operator_notes=""
         map_box(c, L, 125, W, 420, shot_map)
         footer(c, f"Pag. {page}/{pages}")
         c.showPage()
-    if misure:
+    blocchi = pagine_misure(misure or [])
+    for i, blocco in enumerate(blocchi):
         page += 1
-        misure_page(c, photo_name, misure, misure_info, misure_controlli)
+        misure_page(c, photo_name, blocco, misure_info, misure_controlli, segue=i > 0, ultima=i == len(blocchi) - 1)
         footer(c, f"Pag. {page}/{pages}")
         c.showPage()
     c.save()

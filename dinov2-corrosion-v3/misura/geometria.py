@@ -87,18 +87,11 @@ def camera(nome: str, pos, pitch: float, yaw: float, roll: float, k: dict, w: in
                        fx_pix=k["fx"] * scala_f, fy_pix=k["fy"] * scala_f, cx_pix=k["cx"], cy_pix=k["cy"], **extra)
 
 
-def ruota(vec: np.ndarray, asse: np.ndarray, gradi: float) -> np.ndarray:
-    """Rotazione di Rodrigues di ``vec`` attorno ad ``asse``."""
-    a = asse / np.linalg.norm(asse)
-    t = np.deg2rad(gradi)
-    return vec * np.cos(t) + np.cross(a, vec) * np.sin(t) + a * (a @ vec) * (1 - np.cos(t))
-
-
 @dataclass
 class Proiettore:
-    """Pixel della foto principale → punti 3D sul piano della faccia del sostegno.
+    """Pixel della foto principale → punti 3D sul piano della faccia del sostegno (dalla sessione multi-foto).
 
-    ``campioni`` sono le 200 varianti Monte Carlo (camera, piano) da cui si ricava l'U95 = 2σ.
+    ``campioni`` sono le 200 varianti Monte Carlo (camera, piano) da cui si ricava l'U95 (intervallo al 95 %).
     """
     cam: CameraModel
     piano: Piano

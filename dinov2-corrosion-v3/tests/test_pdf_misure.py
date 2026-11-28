@@ -63,6 +63,26 @@ class PdfMisureTest(unittest.TestCase):
             self.assertIn(atteso, t)
         self.assertIn("\\261", t.replace("±", "\\261"))  # ± presente (codifica WinAnsi)
 
+    def test_misure_non_misurabili_e_parziali(self):
+        speciali = [{"id": "linea-L9", "tipo": "linea", "nome": "L9", "valore": 0.0, "u95": 0.0, "unita": "m",
+                     "etichetta": "STIMA", "extra": {"errore": "un punto non cade sulla faccia"}},
+                    {**MISURE[0], "extra": {**MISURE[0]["extra"], "non_misurabile_pct": 12.0}}]
+        t = estrai_testo(build(misure=speciali, misure_info=INFO))
+        self.assertIn("non misurabile", t)
+        self.assertIn("parz. 12%", t)  # nel PDF le parentesi sono scritte come \( \)
+        self.assertIn("non misurata", t)
+
+    def test_molte_misure_tutte_stampate(self):
+        tante = [{"id": f"linea-M{i}", "tipo": "linea", "nome": f"Misura numero {i}", "valore": 1.5, "u95": 0.1,
+                  "unita": "m", "etichetta": "STIMA", "extra": {}} for i in range(1, 61)]
+        pdf = build(misure=tante, misure_info=INFO)
+        t = estrai_testo(pdf)
+        for i in (1, 27, 28, 59, 60):
+            self.assertIn(f"Misura numero {i})", t)  # ")" chiude la stringa PDF: niente falsi positivi tipo "6" in "60"
+        self.assertGreater(pagine(pdf), 2)
+        self.assertEqual(t.count("Superficie reale stimata"), 1)  # spiegazione solo in fondo
+        self.assertIn(f"Pag. {pagine(pdf)}/{pagine(pdf)}", t)
+
 
 if __name__ == "__main__":
     unittest.main()

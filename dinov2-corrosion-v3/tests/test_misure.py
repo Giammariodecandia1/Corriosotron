@@ -18,6 +18,14 @@ def proiettore(n_campioni=200):
                                 campioni=[(cam, piano)] * n_campioni, info={})
 
 
+def proiettore_suolo():
+    """Stessa camera, orizzontale, sopra un piano a terra 10 m più in basso: sopra la riga 1500 nessun punto."""
+    from misura import geometria
+    pr = proiettore(n_campioni=20)
+    piano = geometria.Piano(np.array([0.0, 0.0, -10.0]), np.array([0.0, 0.0, 1.0]))
+    return geometria.Proiettore(cam=pr.cam, piano=piano, etichetta="STIMA", campioni=[(pr.cam, piano)] * 20, info={})
+
+
 ROI = [1950.0, 1450.0, 2050.0, 1550.0]  # 100×100 px → maschera 100×100: 1 cella = 1 px
 
 
@@ -81,6 +89,31 @@ class MisureTest(unittest.TestCase):
         self.assertEqual((m.tipo, m.unita), ("area", "m²"))
         self.assertAlmostEqual(m.valore, 1.0, delta=0.01)
         self.assertGreater(m.u95, 0)
+
+    def test_u95_robusto_ai_casi_estremi(self):
+        from misura import misure
+        rng = np.random.default_rng(0)
+        valori = list(rng.normal(10.0, 0.5, 197)) + [1e3, 1e3, -1e3]  # 3 campioni assurdi su 200
+        self.assertAlmostEqual(misure._u95(valori), 1.0, delta=0.25)
+
+    def test_zona_non_proiettabile_segnalata(self):
+        from misura import misure
+        mask = np.full((100, 100), 3, np.uint8)
+        # piano orizzontale 10 m sotto la camera: la metà alta della ROI guarda sopra l'orizzonte
+        out = misure.misure_automatiche(proiettore_suolo(), mask, ROI, None)
+        m = per_nome(out, "Ruggine intensa")
+        self.assertTrue(np.isfinite(m.valore) and m.valore > 0)
+        self.assertAlmostEqual(m.extra["non_misurabile_pct"], 50.0, delta=3.0)
+        self.assertNotIn("non_misurabile_pct", per_nome(misure.misure_automatiche(proiettore(), mask, ROI, None),
+                                                        "Ruggine intensa").extra)
+
+    def test_linea_impossibile_non_rompe(self):
+        import json
+        from misura import misure
+        m = misure.misura_linea(proiettore_suolo(), [(2000, 1600), (2000, 1000)], "L9")  # 2° punto sopra l'orizzonte
+        self.assertIn("errore", m.extra)
+        self.assertIn("sopra l'orizzonte", m.extra["errore"])
+        json.dumps(m.to_dict(), allow_nan=False)  # niente NaN: il server risponde invece di dare errore 500
 
     def test_to_dict(self):
         from misura import misure

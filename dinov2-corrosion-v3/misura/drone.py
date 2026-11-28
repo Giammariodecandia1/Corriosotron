@@ -193,6 +193,13 @@ def intrinseci(meta: FotoMeta, profilo: Profilo) -> Optional[dict]:
         return {"fx": fx, "fy": fx, "cx": w / 2, "cy": h / 2, "fonte": "sensore", "calibrata": False, "dist": None}
     return None
 
+def etichetta_rtk(meta: FotoMeta) -> str:
+    stato = {50: "RTK FIX", 34: "RTK FLOAT", 16: "GNSS singolo", 0: "senza RTK"}.get(meta.rtk_flag, "RTK sconosciuto")
+    if meta.rtk_std_h is not None:
+        return f"{stato} · ±{max(1, round(meta.rtk_std_h * 100))} cm"
+    return stato
+
+
 def misurabile(meta: FotoMeta, profilo: Profilo) -> tuple[bool, str]:
     if (meta.gimbal_pitch is None or meta.gimbal_yaw is None or meta.rel_alt is None
             or meta.lat is None or meta.lon is None):

@@ -78,31 +78,15 @@ class ApiMisuraTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_stima_ok(self):
-        r = self.c.post("/api/misura/stima", json={"result_id": "r1", "supporto_box": BOX,
-                                                   "linee": [{"nome": "L1", "punti": [[4000, 2000], [4000, 2600]]}],
-                                                   "aree": []})
-        self.assertEqual(r.status_code, 200, r.text)
-        j = r.json()
-        self.assertEqual(j["etichetta"], "STIMA")
-        nomi = {m["nome"] for m in j["misure"]}
-        self.assertIn("Ruggine intensa", nomi)
-        self.assertIn("L1", nomi)
-        self.assertEqual(j["info"]["fonte_distanza"], "geometria")
-
-    def test_stima_result_scaduto(self):
-        r = self.c.post("/api/misura/stima", json={"result_id": "nope", "supporto_box": BOX})
+    def test_analisi_scaduta(self):
+        r = self.c.post("/api/misura/sessione/apri", json={"result_id": "nope"})
         self.assertEqual(r.status_code, 404)
         self.assertIn("ripeti l'analisi", r.json()["detail"])
 
-    def test_nessuna_stima(self):
-        r = self.c.post("/api/misura/stima", json={"result_id": "r1", "supporto_box": [3000, 300, 5000, 6000]})
-        self.assertEqual(r.status_code, 200)
-        self.assertIn("base", r.json()["nessuna_stima"]["motivo"])
-
     def test_pdf_con_misure(self):
-        m = self.c.post("/api/misura/stima", json={"result_id": "r1", "supporto_box": BOX}).json()["misure"]
-        r = self.c.post("/api/misura/pdf", json={"result_id": "r1", "misure": m[:1]})
+        m = {"id": "linea-L1", "tipo": "linea", "nome": "L1", "valore": 1.62, "u95": 0.26, "unita": "m",
+             "etichetta": "NON VALIDATA", "extra": {}}
+        r = self.c.post("/api/misura/pdf", json={"result_id": "r1", "misure": [m]})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertTrue(base64.b64decode(r.json()["report_pdf_base64"]).startswith(b"%PDF"))
 
@@ -110,8 +94,14 @@ class ApiMisuraTest(unittest.TestCase):
         s = self.c.post("/api/misura/sessione/apri", json={"result_id": "r1"}).json()["sessione"]
         self.assertEqual(s["sha_principale"], "sha4")
         self.assertEqual(len(s["foto"]), 1)
+        lontana = self.c.post("/api/misura/sessione/foto", data={"sha_principale": "sha4"},
+                              files={"file": ("Camera_3.jpg", CAM3.read_bytes(), "image/jpeg")}).json()
+        self.assertFalse(lontana["misurabile"], lontana)  # scattata a km di distanza: altro sostegno
+        b4 = CAM4.read_bytes()
+        self.assertEqual(b4.count(b"+781.875"), 1)
         info = self.c.post("/api/misura/sessione/foto", data={"sha_principale": "sha4"},
-                           files={"file": ("Camera_3.jpg", CAM3.read_bytes(), "image/jpeg")}).json()
+                           files={"file": ("Camera_4_piu_10m.jpg", b4.replace(b"+781.875", b"+791.875"),
+                                           "image/jpeg")}).json()
         self.assertTrue(info["misurabile"], info)
         self.assertEqual(self.c.get(f"/api/misura/sessione/foto/{info['sha']}").status_code, 200)
         r = self.c.post("/api/misura/sessione/punto", json={"sha_principale": "sha4", "pid": "T1", "sha_foto": "sha4",

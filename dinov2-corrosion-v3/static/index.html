@@ -265,7 +265,8 @@ canvas{display:block;cursor:crosshair;touch-action:none;margin:auto;flex:none}
   <div class="vpane map"><span class="cap" id="vMapCap">MAPPA DI CLASSIFICAZIONE</span><div class="vstage"><img id="vMap" alt="Mappa ingrandita" draggable="false"><svg id="vSvg" preserveAspectRatio="none"></svg></div></div>
   <div class="ctable" id="ctable" hidden></div>
   <aside class="mpanel" id="measurePanel" hidden aria-label="Misure">
-   <section class="mcard" id="mpPhoto"><h4>Foto e drone</h4><div id="mpPhotoBody"></div><div id="mpStatus" class="mnote"></div></section>
+   <section class="mcard" id="mpPhoto"><h4>Sessione multi-foto</h4><div id="mpPhotoBody"></div><div id="mpStatus" class="mnote"></div>
+    <button id="mpOpenSession" type="button">＋ Apri sessione multi-foto (≥ 2 foto)</button></section>
    <section class="mcard" id="mpAuto"><h4>Misure automatiche (ruggine)</h4>
     <label class="mfactor" title="Acciaio totale dei profilati / parte visibile in foto. Angolari a L ≈ 3">Fattore di sviluppo <input id="mpFactor" type="number" min="1" max="8" step="0.1" value="3"></label>
     <div id="mpAutoList"></div></section>
@@ -273,9 +274,6 @@ canvas{display:block;cursor:crosshair;touch-action:none;margin:auto;flex:none}
     <div class="mtools"><button id="mpLine" type="button">／ Linea</button><button id="mpArea" type="button">⬠ Area</button></div>
     <div class="mnote">Clic sui vertici · doppio clic per finire · Esc annulla · Canc elimina la misura selezionata</div>
     <div id="mpList"></div></section>
-   <section class="mcard" id="mpPrecise"><h4>Misura precisa</h4>
-    <div class="mnote">Aggiungi altre foto dello stesso sostegno e segna i tie point: le stime diventano misure 3D.</div>
-    <button id="mpOpenSession" type="button">＋ Apri sessione multi-foto (≥ 2 foto)</button></section>
   </aside>
  </div></div>
 </div>
@@ -560,43 +558,41 @@ for(const pane of document.querySelectorAll('#vbody .vpane')){
   pane.addEventListener('pointermove',mv);pane.addEventListener('pointerup',up);pane.addEventListener('pointercancel',up)});
  pane.addEventListener('dblclick',()=>{if(M.on&&(M.tool==='linea'||M.tool==='area'))mFinish();else vFit()});pane.addEventListener('contextmenu',e=>e.preventDefault())}
 addEventListener('resize',()=>{if(el('viewer').classList.contains('open')){let s=V.scale;vLayout();V.scale=s;vApply()}});
-// ---- v3: «📐 Misura» (funzione secondaria): stima da una foto, misure a mano, PDF con le misure spuntate
-const M={on:false,tool:null,draft:[],shapes:[],sel:-1,res:null,base:null,esito:null,sha:null,pdf:new Set(),seq:0,nL:0,nA:0};
+// ---- v3: «📐 Misura» (funzione secondaria): misure dalla sessione multi-foto, misure a mano, PDF con le misure spuntate
+const M={on:false,tool:null,draft:[],shapes:[],sel:-1,res:null,esito:null,sha:null,pdf:new Set(),seq:0,nL:0,nA:0};
 const mEsc=t=>String(t??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const mFmt=(v,d=2)=>Number(v).toLocaleString('it-IT',{minimumFractionDigits:d,maximumFractionDigits:d});
-function mVal(m){return m.unita==='m'&&m.valore<1?mFmt(m.valore*100,0)+' ± '+mFmt(m.u95*100,0)+' cm':m.unita==='m²'&&m.valore<0.1?mFmt(m.valore*1e4,0)+' ± '+mFmt(m.u95*1e4,0)+' cm²':mFmt(m.valore)+' ± '+mFmt(m.u95)+' '+m.unita}
+function mVal(m){let x=m.extra||{};if(x.errore)return 'non misurabile';let s=m.unita==='m'&&m.valore<1?mFmt(m.valore*100,0)+' ± '+mFmt(m.u95*100,0)+' cm':m.unita==='m²'&&m.valore<0.1?mFmt(m.valore*1e4,0)+' ± '+mFmt(m.u95*1e4,0)+' cm²':mFmt(m.valore)+' ± '+mFmt(m.u95)+' '+m.unita;return x.non_misurabile_pct?s+' (parziale)':s}
+function mWarn(m){let x=m.extra||{};return x.errore?'<div class="msub mwarn">⚠️ '+mEsc(x.errore)+'</div>':x.non_misurabile_pct?'<div class="msub mwarn">⚠️ '+mFmt(x.non_misurabile_pct,0)+'% dei pixel non cade sulla faccia del sostegno (sopra l\'orizzonte o troppo lontano): quella parte non è misurata</div>':''}
 function mDim(x){return mFmt(x.lunghezza_m*100,0)+' ± '+mFmt((x.u95_lunghezza_m||0)*100,0)+' × '+mFmt(x.larghezza_m*100,0)+' ± '+mFmt((x.u95_larghezza_m||0)*100,0)+' cm'}
 function mTag(e){return '<span class="mtag '+({'VALIDATA':'val','NON VALIDATA':'nv','INCOMPLETA':'nv'}[e]||'est')+'">'+mEsc(e)+'</span>'}
 function mGeo(){let r=last.report,b=r.roi_original_pixels,d=r.mask_dimensions_px;return {b,w:d[0],h:d[1]}}
 function g2p(x,y){let g=mGeo();return [g.b[0]+x*(g.b[2]-g.b[0])/g.w,g.b[1]+y*(g.b[3]-g.b[1])/g.h]}
 function p2g(u,v){let g=mGeo();return [(u-g.b[0])*g.w/(g.b[2]-g.b[0]),(v-g.b[1])*g.h/(g.b[3]-g.b[1])]}
-// riquadro del sostegno scelto come ROI automatica, in pixel della foto analizzata
-function mSupport(){let d=autoRoiInfo&&autoRoiInfo.main,src=last.report.parameters?.source_dimensions_px;if(!d||!detection||!src)return null;let kx=src[0]/detection.width,ky=src[1]/detection.height,q=d.box_px;return [q[0]*kx,q[1]*ky,q[2]*kx,q[3]*ky]}
 function mShow(on){M.on=on;el('vMeasure').classList.toggle('on',on);el('measurePanel').hidden=!on;if(!on){M.tool=null;M.draft=[]}mTools();requestAnimationFrame(()=>{vFit();mDraw()})}
-function mReset(){sdClose();Object.assign(M,{tool:null,draft:[],shapes:[],sel:-1,res:null,base:null,esito:null,sha:null,pdf:new Set(),nL:0,nA:0});mShow(false);mRender()}
+function mReset(){sdClose();Object.assign(M,{tool:null,draft:[],shapes:[],sel:-1,res:null,esito:null,sha:null,pdf:new Set(),nL:0,nA:0});mShow(false);mRender()}
 function mTools(){el('mpLine').classList.toggle('on',M.tool==='linea');el('mpArea').classList.toggle('on',M.tool==='area');el('vbody').classList.toggle('measuring',!!(M.on&&M.tool))}
 function mSetTool(t){M.tool=M.tool===t?null:t;M.draft=[];mTools();mDraw()}
 function mBody(){return {linee:M.shapes.filter(x=>x.tipo==='linea').map(x=>({nome:x.nome,punti:x.punti})),aree:M.shapes.filter(x=>x.tipo==='area').map(x=>({nome:x.nome,punti:x.punti})),fattore:Number(el('mpFactor').value)||3}}
-async function mRefresh(){if(!M.on||!last)return;let my=++M.seq,body={result_id:last.report.result_id,...mBody()},url='/api/misura/stima';
-if(M.esito&&M.esito.completa&&M.sha){url='/api/misura/sessione/calcola';body.sha_principale=M.sha}else{body.supporto_box=mSupport();body.base_px=M.base}
+async function mRefresh(){if(!M.on||!last)return;if(!(M.esito&&M.esito.completa&&M.sha)){M.res=null;mRender();return}
+let my=++M.seq,body={result_id:last.report.result_id,sha_principale:M.sha,...mBody()},url='/api/misura/sessione/calcola';
 el('mpStatus').textContent='Calcolo misure…';let j;
 try{let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});j=await readReply(r);if(!r.ok)throw Error(typeof j.detail==='string'?j.detail:'Errore '+r.status)}
 catch(e){if(my===M.seq){el('mpStatus').textContent='';fail('Misura: '+e.message)}return}
-if(my!==M.seq)return;if(url.includes('sessione'))M.esito=j;M.res=j;el('mpStatus').textContent='';mRender()}
+if(my!==M.seq)return;M.esito=j;M.res=j.completa?j:null;el('mpStatus').textContent='';mRender()}
 function mKv(k,v){return '<div class="mkv"><span>'+k+'</span><span>'+v+'</span></div>'}
-function mRow(m,extra){return '<div class="mrow" data-nome="'+mEsc(m.nome)+'"><label title="Includi nel PDF"><input type="checkbox" class="mp-pdf" data-id="'+mEsc(m.id)+'"'+(M.pdf.has(m.id)?' checked':'')+'> PDF</label><span class="mname">'+mEsc(m.nome)+'</span><b>'+mVal(m)+'</b>'+(extra||'')+'</div>'}
+function mRow(m,extra){return '<div class="mrow" data-nome="'+mEsc(m.nome)+'"><label title="Includi nel PDF"><input type="checkbox" class="mp-pdf" data-id="'+mEsc(m.id)+'"'+(M.pdf.has(m.id)?' checked':'')+'> PDF</label><span class="mname">'+mEsc(m.nome)+'</span><b>'+mVal(m)+'</b>'+(extra||'')+'</div>'+mWarn(m)}
 function mRender(){let j=M.res,ph=el('mpPhotoBody'),auto=el('mpAutoList'),list=el('mpList');
-if(!j){ph.innerHTML='';auto.innerHTML='';list.innerHTML='';mDraw();return}
-if(j.nessuna_stima){ph.innerHTML='<p class="mwarn">Nessuna stima: '+mEsc(j.nessuna_stima.motivo)+'</p><p class="mnote">'+mEsc(j.nessuna_stima.suggerimento)+'</p><button id="mpBase" type="button">Clicca la base del sostegno</button>';
- el('mpBase').onclick=()=>{M.tool='base';M.draft=[];mTools();el('mpStatus').textContent='Clicca sulla foto il piede del sostegno'};auto.innerHTML='';list.innerHTML='';mDraw();return}
-let i=j.info||{},fonte={laser:'telemetro laser',geometria:'gimbal + quota','tie point':'tie point'}[i.fonte_distanza]||'';
-ph.innerHTML=(i.drone?mKv('Drone',mEsc(i.drone)):'')+(i.rtk?mKv('Posizione',mEsc(i.rtk)):'')+(i.distanza_m!=null?mKv('Distanza',mFmt(i.distanza_m,1)+' m <span class="dim">('+fonte+')</span>'):'')
- +(i.scala_mm_px_centro!=null?mKv('Scala al centro',mFmt(i.scala_mm_px_centro,1)+' mm/px'):'')+(i.tie_point?mKv('Tie point',i.tie_point+' in '+i.foto_usate+' foto'):'')+mKv('Esito',mTag(j.etichetta))+(i.avviso?'<p class="mwarn">⚠️ '+mEsc(i.avviso)+'</p>':'')
+if(!j){ph.innerHTML='<p class="mnote">Le misure in metri si ricavano solo da più foto: apri la sessione, aggiungi almeno un\'altra foto dello stesso sostegno scattata da un\'altra direzione, segna gli stessi punti (tie point) in tutte e premi «Calcola».</p>';
+ auto.innerHTML='<div class="mnote">Disponibili dopo «Calcola» nella sessione.</div>';
+ list.innerHTML=M.shapes.map(s=>'<div class="mrow" data-nome="'+mEsc(s.nome)+'"><span class="mname">'+mEsc(s.nome)+'</span><b class="dim">—</b><button type="button" class="mdel" title="Elimina">✕</button></div>').join('')||'<div class="mnote">Nessuna misura a mano.</div>'}
+else{let i=j.info||{};
+ph.innerHTML=(i.tie_point?mKv('Tie point',i.tie_point+' in '+i.foto_usate+' foto'):'')+(i.convergenza_deg!=null?mKv('Convergenza',mFmt(i.convergenza_deg,0)+'°'):'')+mKv('Esito',mTag(j.etichetta))
  +((j.controlli||[]).length?'<div class="mnote">'+j.controlli.map(c=>(c.ok?'✅ ':'⚠️ ')+mEsc(c.testo)).join('<br>')+'</div>':'');
 let ms=j.misure||[];
-auto.innerHTML=ms.filter(m=>m.tipo==='classe').map(m=>mRow(m)+'<div class="msub">Superficie reale stimata: '+mFmt(m.extra.reale_m2)+' ± '+mFmt(m.extra.u95_reale_m2)+' m² '+mTag('STIMA')+'</div>').join('')
+auto.innerHTML=ms.filter(m=>m.tipo==='classe').map(m=>mRow(m)+'<div class="msub">Superficie reale stimata: '+mVal({valore:m.extra.reale_m2,u95:m.extra.u95_reale_m2,unita:'m²'})+' '+mTag('STIMA')+'</div>').join('')
  +ms.filter(m=>m.tipo==='anomalia').map(m=>mRow({...m,nome:m.nome.replace('Anomalia ','')+' · '+mDim(m.extra)})).join('');
-list.innerHTML=ms.filter(m=>m.tipo==='linea'||m.tipo==='area').map(m=>mRow(m,'<button type="button" class="mdel" title="Elimina">✕</button>')).join('')||'<div class="mnote">Nessuna misura a mano.</div>';
+list.innerHTML=ms.filter(m=>m.tipo==='linea'||m.tipo==='area').map(m=>mRow(m,'<button type="button" class="mdel" title="Elimina">✕</button>')).join('')||'<div class="mnote">Nessuna misura a mano.</div>'}
 for(const r of list.querySelectorAll('.mrow')){let k=M.shapes.findIndex(x=>x.nome===r.dataset.nome);r.classList.toggle('sel',k===M.sel);r.onclick=e=>{if(e.target.closest('label'))return;if(e.target.closest('.mdel')){mDelete(k);return}M.sel=k;mRender()}}
 for(const c of document.querySelectorAll('#measurePanel .mp-pdf'))c.onchange=()=>{c.checked?M.pdf.add(c.dataset.id):M.pdf.delete(c.dataset.id)};
 mDraw()}
@@ -608,13 +604,11 @@ let tag=(gx,gy,text,col)=>{let t=document.createElementNS(NS,'g');t.classList.ad
 M.shapes.forEach((s,k)=>{let on=k===M.sel;poly(s.punti,s.tipo==='area',on?'#ffffff':'#4f8cff',false,on?3.2:2.5);let m=val[s.nome],[x,y]=p2g(...s.punti[s.punti.length-1]);tag(x,y,s.nome+(m?' = '+mVal(m):''),on?'#0b5fd6':'#1d4fb8')});
 if(M.draft.length)poly(M.draft,false,'#9fc0ff',true,2);
 let cl=last.report.anomaly_clusters?.clusters||[];for(const m of (M.res&&M.res.misure)||[])if(m.tipo==='anomalia'){let c=cl.find(c=>'Anomalia '+c.id===m.nome);if(c)tag(c.bbox_px[2],c.bbox_px[3]+16,mDim(m.extra),'#7a1f2e')}
-if(M.base){let [x,y]=p2g(...M.base);tag(x,y,'base','#2f6f3e')}
 vApply()}
 function mClick(pane,ev){if(!M.on||!M.tool)return;let r=pane.querySelector('.vstage').getBoundingClientRect(),gx=(ev.clientX-r.left)/r.width*V.w,gy=(ev.clientY-r.top)/r.height*V.h;if(gx<0||gy<0||gx>V.w||gy>V.h)return;let p=g2p(gx,gy);
-if(M.tool==='base'){M.base=p;M.tool=null;mTools();el('mpStatus').textContent='';mRefresh();return}
 let q=M.draft[M.draft.length-1];if(q){let a=p2g(...q);if(Math.hypot(a[0]-gx,a[1]-gy)<2)return}M.draft.push(p);mDraw()}
 function mFinish(){let t=M.tool;if(M.draft.length>=(t==='linea'?2:3)){M.shapes.push({tipo:t,nome:t==='linea'?'L'+(++M.nL):'S'+(++M.nA),punti:M.draft});M.sel=M.shapes.length-1;M.draft=[];mRefresh()}else M.draft=[];mDraw()}
-el('vMeasure').onclick=()=>{mShow(!M.on);if(M.on&&!M.res)mRefresh()};
+el('vMeasure').onclick=()=>{mShow(!M.on);if(M.on)mRender()};
 el('mpLine').onclick=()=>mSetTool('linea');el('mpArea').onclick=()=>mSetTool('area');
 el('mpFactor').onchange=()=>{if(M.on)mRefresh()};
 document.addEventListener('keydown',e=>{if(!M.on||!el('viewer').classList.contains('open')||e.target.closest('input,select,textarea'))return;

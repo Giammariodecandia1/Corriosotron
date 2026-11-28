@@ -1,4 +1,4 @@
-"""Misure in m e m² sopra un Proiettore (stima da una foto o sessione multi-foto).
+"""Misure in m e m² sopra il Proiettore della sessione multi-foto.
 
 U95 = 2σ sui campioni Monte Carlo del proiettore (GUM Supplemento 1). Per linee e aree tracciate a mano
 ogni campione sposta anche i vertici di N(0, 1,5 px), l'incertezza di clic di DISTIX.
@@ -46,8 +46,13 @@ class Misura:
 
 
 def _u95(valori) -> float:
+    """Metà dell'intervallo di copertura al 95 % (percentili 2,5–97,5, GUM S1 §7.7): pochi campioni Monte Carlo
+    assurdi (gimbal estremo, raggio quasi radente) non lo gonfiano come farebbe 2σ."""
     valori = np.asarray([v for v in valori if np.isfinite(v)], dtype=np.float64)
-    return float(2 * valori.std(ddof=1)) if len(valori) > 1 else 0.0
+    if len(valori) < 2:
+        return 0.0
+    basso, alto = np.percentile(valori, [2.5, 97.5])
+    return float((alto - basso) / 2)
 
 
 def _proiezioni(pr: Proiettore):
@@ -87,7 +92,19 @@ class _Blocchi:
 
 
 def _area(conteggi, aree) -> float:
-    return float(np.nansum(conteggi * aree))
+    """Area delle celle proiettabili; NaN se qualche cella con pixel non si proietta (campione da scartare)."""
+    if np.any(conteggi[~np.isfinite(aree)]):
+        return float("nan")
+    return float(np.sum(conteggi * aree))
+
+
+def _area_parziale(conteggi, aree) -> tuple[float, float]:
+    """Area nominale delle sole celle proiettabili e % di pixel che non si proiettano (sopra l'orizzonte o
+    dietro la camera): quella parte non è misurata."""
+    ok = np.isfinite(aree)
+    tot = float(conteggi.sum())
+    persi = float(conteggi[~ok].sum())
+    return float(np.sum(conteggi[ok] * aree[ok])), (100.0 * persi / tot if tot else 0.0)
 
 
 def _pixel_anomalia(rust: np.ndarray, gruppi: Optional[np.ndarray], a: dict) -> np.ndarray:
@@ -125,13 +142,24 @@ def misure_automatiche(proiettore: Proiettore, class_mask: np.ndarray, roi_box, 
         anomalie.append((a, bl.conta(sel), u, v))
     serie = {cid: [] for cid, _ in CLASSI}
     serie_an = [([], [], []) for _ in anomalie]
-    for f in _proiezioni(proiettore):
+    persi = {}       # % di pixel non proiettabili nella proiezione nominale
+    persi_an = []
+    for k, f in enumerate(_proiezioni(proiettore)):
         aree = bl.area_cella(f)
         for cid, _ in CLASSI:
-            serie[cid].append(_area(conteggi[cid], aree))
+            if k == 0:
+                area, persi[cid] = _area_parziale(conteggi[cid], aree)
+            else:
+                area = _area(conteggi[cid], aree)
+            serie[cid].append(area)
         for (a, cnt, u, v), (s_area, s_oriz, s_vert) in zip(anomalie, serie_an):
             p = f(u, v)
-            s_area.append(_area(cnt, aree))
+            if k == 0:
+                area, pct = _area_parziale(cnt, aree)
+                persi_an.append(pct)
+            else:
+                area = _area(cnt, aree)
+            s_area.append(area)
             s_oriz.append(float(np.linalg.norm(p[1] - p[0])))
             s_vert.append(float(np.linalg.norm(p[3] - p[2])))
     out = []
@@ -139,16 +167,24 @@ def misure_automatiche(proiettore: Proiettore, class_mask: np.ndarray, roi_box, 
         valore, u95 = serie[cid][0], _u95(serie[cid][1:])
         reale = valore * fattore
         rel = math.hypot(u95 / valore, u95_fattore / fattore) if valore > 0 else 0.0
-        out.append(Misura(f"classe-{cid}", "classe", nome, valore, u95, "m²", proiettore.etichetta,
-                          {"reale_m2": reale, "u95_reale_m2": reale * rel, "fattore": fattore,
-                           "u95_fattore": u95_fattore, "etichetta_reale": "STIMA"}))
-    for (a, *_), (s_area, s_oriz, s_vert) in zip(anomalie, serie_an):
-        lato = [(s_oriz[0], _u95(s_oriz[1:])), (s_vert[0], _u95(s_vert[1:]))]
+        extra = {"reale_m2": reale, "u95_reale_m2": reale * rel, "fattore": fattore,
+                 "u95_fattore": u95_fattore, "etichetta_reale": "STIMA"}
+        if persi[cid] > 0:
+            extra["non_misurabile_pct"] = round(persi[cid], 1)
+        out.append(Misura(f"classe-{cid}", "classe", nome, valore, u95, "m²", proiettore.etichetta, extra))
+    for (a, *_), (s_area, s_oriz, s_vert), pct in zip(anomalie, serie_an, persi_an):
+        lato = [(_finito(s_oriz[0]), _u95(s_oriz[1:])), (_finito(s_vert[0]), _u95(s_vert[1:]))]
         (lung, u_lung), (larg, u_larg) = sorted(lato, key=lambda t: -t[0])
+        extra = {"lunghezza_m": lung, "larghezza_m": larg, "u95_lunghezza_m": u_lung, "u95_larghezza_m": u_larg}
+        if pct > 0 or not (np.isfinite(s_oriz[0]) and np.isfinite(s_vert[0])):
+            extra["non_misurabile_pct"] = round(max(pct, 0.1), 1)
         out.append(Misura(f"anomalia-{a['id']}", "anomalia", f"Anomalia {a['id']}", s_area[0], _u95(s_area[1:]), "m²",
-                          proiettore.etichetta, {"lunghezza_m": lung, "larghezza_m": larg,
-                                                 "u95_lunghezza_m": u_lung, "u95_larghezza_m": u_larg}))
+                          proiettore.etichetta, extra))
     return out
+
+
+def _finito(x: float) -> float:
+    return float(x) if np.isfinite(x) else 0.0
 
 
 def _lunghezza(p: np.ndarray) -> float:
@@ -159,9 +195,15 @@ def _area_poligono(p: np.ndarray) -> float:
     return float(0.5 * np.linalg.norm(np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)))
 
 
+ERRORE_MANUALE = ("un punto non cade sulla faccia del sostegno (sopra l'orizzonte o dietro la camera): "
+                  "ridisegna la misura sul sostegno")
+
+
 def _manuale(proiettore: Proiettore, punti_px, calcolo, seed: int) -> tuple[float, float]:
     uv = np.asarray(punti_px, dtype=np.float64)
     valore = calcolo(proiettore.punti(uv[:, 0], uv[:, 1]))
+    if not np.isfinite(valore):
+        return float("nan"), 0.0
     rng = np.random.default_rng(seed)
     serie = []
     for k in range(len(proiettore.campioni)):
@@ -170,13 +212,17 @@ def _manuale(proiettore: Proiettore, punti_px, calcolo, seed: int) -> tuple[floa
     return valore, _u95(serie)
 
 
+def _misura_manuale(tipo, unita, calcolo, proiettore, punti_px, nome, seed) -> Misura:
+    valore, u95 = _manuale(proiettore, punti_px, calcolo, seed)
+    extra = {"punti_px": [list(map(float, p)) for p in punti_px]}
+    if not np.isfinite(valore):  # la misura resta in elenco (si può cancellare) con il motivo, senza numeri NaN
+        valore, extra["errore"] = 0.0, ERRORE_MANUALE
+    return Misura(f"{tipo}-{nome}", tipo, nome, valore, u95, unita, proiettore.etichetta, extra)
+
+
 def misura_linea(proiettore: Proiettore, punti_px, nome: str, seed: int = 0) -> Misura:
-    valore, u95 = _manuale(proiettore, punti_px, _lunghezza, seed)
-    return Misura(f"linea-{nome}", "linea", nome, valore, u95, "m", proiettore.etichetta,
-                  {"punti_px": [list(map(float, p)) for p in punti_px]})
+    return _misura_manuale("linea", "m", _lunghezza, proiettore, punti_px, nome, seed)
 
 
 def misura_area(proiettore: Proiettore, punti_px, nome: str, seed: int = 0) -> Misura:
-    valore, u95 = _manuale(proiettore, punti_px, _area_poligono, seed)
-    return Misura(f"area-{nome}", "area", nome, valore, u95, "m²", proiettore.etichetta,
-                  {"punti_px": [list(map(float, p)) for p in punti_px]})
+    return _misura_manuale("area", "m²", _area_poligono, proiettore, punti_px, nome, seed)

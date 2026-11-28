@@ -20,7 +20,7 @@ from .distix.bundle_adjustment import TiePointObservation, run_constrained_bundl
 from .distix.coordinate_system import CoordinateManager
 from .distix.triangulation import compute_epipolar_curve_points, triangulate_from_cameras
 from .geometria import Piano, Proiettore, camera
-from .stima_foto import etichetta_rtk
+from .drone import etichetta_rtk
 
 ROOT = Path(__file__).resolve().parents[1]
 CARTELLA = ROOT / "misure"
@@ -30,6 +30,9 @@ SIGMA_PUNTO_M = 0.02          # se la triangolazione non dà covarianza
 SIGMA_ASSETTO_DEG = 0.12      # valore DISTIX quando il BA non stima l'incertezza residua
 MAX_REPROJ_PX = 10.0          # soglia di default di triangulate_from_cameras (DISTIX)
 RICHIESTI = ("T1", "T2", "T3", "T4")
+RAGGIO_TERRA_M = 6371000.0
+# una foto utile per misurare è al massimo a ~300 m dal sostegno: due foto dello stesso sostegno distano ≤ 600 m
+MAX_DISTANZA_FOTO_M = 600.0
 
 
 @dataclass
@@ -74,10 +77,32 @@ class Sessione:
         meta = drone.leggi_foto(data, size)
         profilo = drone.scegli_profilo(meta)
         ok, motivo = drone.misurabile(meta, profilo)
-        info = {"sha": sha, "nome": nome, "w": int(size[0]), "h": int(size[1]), "misurabile": ok, "motivo": motivo,
+        if ok and meta.abs_alt is None:
+            # la stima da una foto usa la quota relativa; fra più foto serve quella assoluta (AbsoluteAltitude)
+            ok, motivo = False, "manca la quota assoluta del drone (AbsoluteAltitude): serve per unire più foto"
+        if ok and sha != self.sha_principale:
+            d = self._distanza_da_principale(meta)
+            if d is not None and d > MAX_DISTANZA_FOTO_M:
+                km = f"{d / 1000:.1f}".replace(".", ",")
+                ok, motivo = False, f"scattata a {km} km dalla foto principale: è la foto di un altro sostegno"
+        info ={"sha": sha, "nome": nome, "w": int(size[0]), "h": int(size[1]), "misurabile": ok, "motivo": motivo,
                 "drone": profilo.nome, "rtk": etichetta_rtk(meta), "yaw": meta.gimbal_yaw}
         self.foto.append(info)
         return info
+
+    def _distanza_da_principale(self, meta) -> Optional[float]:
+        """Distanza orizzontale in m fra il drone di questa foto e quello della foto principale."""
+        p = next((f for f in self.foto if f["sha"] == self.sha_principale), None)
+        path = Path(self.cartella) / "foto" / f"{self.sha_principale}.jpg"
+        if p is None or not path.exists() or meta.lat is None or meta.lon is None:
+            return None
+        m0 = drone.leggi_foto(path.read_bytes(), (p["w"], p["h"]))
+        if m0.lat is None or m0.lon is None:
+            return None
+        lat0 = np.deg2rad(m0.lat)
+        dn = np.deg2rad(meta.lat - m0.lat) * RAGGIO_TERRA_M
+        de = np.deg2rad(meta.lon - m0.lon) * RAGGIO_TERRA_M * np.cos(lat0)
+        return float(np.hypot(dn, de))
 
     def aggiungi_foto(self, data: bytes, nome: str) -> dict:
         sha = hashlib.sha256(data).hexdigest()
@@ -89,6 +114,13 @@ class Sessione:
                 size = im.size
         except OSError:
             return {"sha": sha, "nome": nome, "misurabile": False, "motivo": "il file non è una foto leggibile"}
+        firma = _firma(drone.leggi_foto(data, size))
+        if firma is not None:
+            for f in self.foto:
+                path = Path(self.cartella) / "foto" / f"{f['sha']}.jpg"
+                if "w" in f and path.exists() and _firma(drone.leggi_foto(path.read_bytes(), (f["w"], f["h"]))) == firma:
+                    # stesso scatto a un'altra risoluzione (es. l'originale della foto analizzata ridotta)
+                    return {**f, "motivo": "foto già presente nella sessione (stesso scatto, altra risoluzione)"}
         info = self._registra(data, nome, sha, size)
         self.salva()
         return info
@@ -102,6 +134,14 @@ class Sessione:
         else:
             obs[sha] = (float(u), float(v))
         self.salva()
+
+
+def _firma(meta) -> Optional[tuple]:
+    """Impronta dello scatto dai metadati (posizione, quote, gimbal): uguale per la stessa foto a qualsiasi
+    risoluzione, diversa per due scatti distinti. None se mancano dati: allora non si confronta."""
+    campi = (meta.make, meta.model, meta.lat, meta.lon, meta.abs_alt, meta.rel_alt,
+             meta.gimbal_pitch, meta.gimbal_yaw, meta.gimbal_roll)
+    return None if any(c is None for c in campi) else campi
 
 
 @dataclass
@@ -154,6 +194,32 @@ def _piano(punti: np.ndarray, verso: np.ndarray) -> Piano:
     return Piano(c, n)
 
 
+def _togli_esclusi(ba, validi: dict, nomi: dict, tie_info: dict, messaggi: list) -> dict:
+    """Toglie dai tie point i clic che il bundle adjustment DISTIX ha scartato come anomali ("T3@foto" = una vista,
+    "T3 (2 viste incoerenti)" = tutto il punto). Solo se il BA è stato applicato: se è stato rifiutato, le sue
+    esclusioni non sono affidabili e i controlli di riproiezione segnalano comunque il problema."""
+    if not getattr(ba, "applied", False):
+        return validi
+    out = {p: dict(o) for p, o in validi.items()}
+    for e in getattr(ba, "excluded_observations", None) or []:
+        if "@" in e:
+            p, s = e.split("@", 1)
+            if s in out.get(p, {}):
+                del out[p][s]
+                messaggi.append(f"{p} nella foto {nomi.get(s, s)}: clic incoerente con le altre foto, escluso")
+        elif e.endswith("(2 viste incoerenti)"):
+            p = e.split(" ", 1)[0]
+            if out.pop(p, None) is not None:
+                messaggi.append(f"{p}: le due foto non indicano lo stesso punto, escluso")
+    for p in validi:
+        if p in out and len(out[p]) < 2:
+            del out[p]
+            messaggi.append(f"{p}: dopo l'esclusione resta in una sola foto, escluso")
+        tie_info[p]["n_foto"] = len(out.get(p, validi[p]))
+        tie_info[p]["escluso"] = p not in out
+    return out
+
+
 def calcola(sessione: Sessione, camere_fn: Callable = camere, seed: int = 0) -> EsitoSessione:
     messaggi = [f"{f['nome']}: {f['motivo']} (esclusa)" for f in sessione.foto if f.get("misurabile") is False]
     cams = camere_fn(sessione)
@@ -176,33 +242,40 @@ def calcola(sessione: Sessione, camere_fn: Callable = camere, seed: int = 0) -> 
 
     osservazioni = [TiePointObservation(p, s, uv[0], uv[1]) for p, o in validi.items() for s, uv in o.items()]
     ba = run_constrained_bundle_adjustment_with_diagnostics(cams, osservazioni)
+    validi = _togli_esclusi(ba, validi, {f["sha"]: f.get("nome", f["sha"]) for f in sessione.foto}, tie_info, messaggi)
     tri = {p: triangulate_from_cameras([(cams[s], tuple(uv)) for s, uv in o.items()]) for p, o in validi.items()}
+    affidabili = {p: r for p, r in tri.items() if r.all_in_front and r.max_reproj_px <= MAX_REPROJ_PX}
     for p, r in tri.items():
         tie_info[p]["reproj_px"] = round(float(r.max_reproj_px), 2)
+        tie_info[p]["nel_piano"] = p in affidabili
+    if len(affidabili) < 3:
+        messaggi.append("servono almeno 3 tie point coerenti fra le foto per trovare la faccia del sostegno "
+                        f"(ora {len(affidabili)}): ricontrolla i clic o aggiungi punti")
+        return EsitoSessione(False, "INCOMPLETA", [], tie_info, None, ba.to_dict(), messaggi)
     cam0 = cams[principale]
-    punti = np.array([r.point_3d for r in tri.values()])
-    piano = _piano(punti, cam0.pos)
+    piano = _piano(np.array([r.point_3d for r in affidabili.values()]), cam0.pos)
 
     usate = sorted({s for o in validi.values() for s in o})
-    conv = min(r.max_convergence_angle_deg for r in tri.values())
+    conv = min(r.max_convergence_angle_deg for r in affidabili.values())
     controlli = [
         {"id": "rtk", "testo": "RTK FIX su tutte le foto", "ok": all(cams[s].rtk_fix for s in usate)},
         {"id": "convergenza", "testo": f"Convergenza ≥ 15° ({conv:.0f}°)", "ok": conv >= 15.0},
         # solo coerenza dei clic: la convergenza ha il suo controllo (is_reliable di DISTIX le unisce)
         {"id": "riproiezione", "testo": "Riproiezione entro soglia DISTIX",
          "ok": all(r.all_in_front and r.max_reproj_px <= MAX_REPROJ_PX for r in tri.values())},
-        {"id": "tie", "testo": f"Almeno {MIN_TIE} tie point in ≥ 2 foto", "ok": True},
+        {"id": "tie", "testo": f"Almeno {MIN_TIE} tie point in ≥ 2 foto", "ok": len(validi) >= MIN_TIE},
         {"id": "calibrazione", "testo": "Camera calibrata",
          "ok": all(getattr(cams[s].calibration, "is_validated", False) for s in usate)},
     ]
     spiega = {"rtk": "almeno una foto non è in RTK FIX: la posizione del drone non è abbastanza precisa",
               "convergenza": "le foto sono troppo allineate: scattane una più di lato (almeno 15° di differenza)",
               "riproiezione": "alcuni punti non tornano fra le foto: controlla di aver cliccato lo stesso punto fisico",
-              "calibrazione": "la camera non ha un profilo di calibrazione: la misura resta NON VALIDATA"}
+              "calibrazione": "la camera non ha un profilo di calibrazione: la misura resta NON VALIDATA",
+              "tie": f"dopo aver escluso i clic incoerenti restano meno di {MIN_TIE} tie point: aggiungine altri"}
     messaggi += [spiega[c["id"]] for c in controlli if not c["ok"] and c["id"] in spiega]
     for p, r in tri.items():
-        if not (r.all_in_front and r.max_reproj_px <= MAX_REPROJ_PX) and r.notes:
-            messaggi.append(f"{p}: {r.notes}")
+        if p not in affidabili:
+            messaggi.append(f"{p}: escluso dalla faccia del sostegno" + (f" ({r.notes})" if r.notes else ""))
     etichetta = "VALIDATA" if all(c["ok"] for c in controlli) else "NON VALIDATA"
 
     rng = np.random.default_rng(seed)
@@ -210,11 +283,11 @@ def calcola(sessione: Sessione, camere_fn: Callable = camere, seed: int = 0) -> 
     campioni = []
     for _ in range(N_CAMPIONI):
         pk = np.array([rng.multivariate_normal(r.point_3d, r.covariance_3d) if r.covariance_3d is not None
-                       else r.point_3d + rng.normal(0, SIGMA_PUNTO_M, 3) for r in tri.values()])
+                       else r.point_3d + rng.normal(0, SIGMA_PUNTO_M, 3) for r in affidabili.values()])
         ck = cam0.clone()
         ck.set_rotation_from_delta(*rng.normal(0, sigma_ass, 3))
         campioni.append((ck, _piano(pk, cam0.pos)))
-    info = {"tie_point": len(validi), "foto_usate": len(usate), "convergenza_deg": round(conv, 1),
+    info = {"tie_point": len(validi), "punti_piano": len(affidabili), "foto_usate": len(usate), "convergenza_deg": round(conv, 1),
             "fonte_distanza": "tie point", "ba": ba.notes}
     pr = Proiettore(cam=cam0, piano=piano, etichetta=etichetta, campioni=campioni, info=info)
     return EsitoSessione(True, etichetta, controlli, tie_info, pr, ba.to_dict(), messaggi)

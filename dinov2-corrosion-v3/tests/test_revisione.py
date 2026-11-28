@@ -1,6 +1,4 @@
-"""Test delle correzioni dopo la revisione finale (laser, metadati, anomalie, U95, distorsione, validazioni)."""
-import dataclasses
-import io
+"""Test delle correzioni dopo la revisione finale (metadati, anomalie, U95, distorsione, validazioni)."""
 import sys
 import tempfile
 import unittest
@@ -11,44 +9,6 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-FOTO = Path(r"C:\Users\gdecandia\Desktop\Oggi2\tralicci corrosione")
-CAM6 = FOTO / "Camera_6_2026-05-08_10.04.57.000.jpg"
-HAS_PHOTOS = CAM6.exists()
-
-
-def leggi(path):
-    from misura import drone
-    data = path.read_bytes()
-    with Image.open(io.BytesIO(data)) as im:
-        size = im.size
-    m = drone.leggi_foto(data, size)
-    return m, drone.scegli_profilo(m)
-
-
-@unittest.skipUnless(HAS_PHOTOS, "foto reali assenti")
-class LaserTest(unittest.TestCase):
-    def test_laser_in_disaccordo_con_geometria_usa_geometria(self):
-        from misura import stima_foto
-        m, p = leggi(CAM6)
-        pr = stima_foto.costruisci(m, p, [3000, 500, 5064, 5800], None)
-        self.assertEqual(pr.info["fonte_distanza"], "geometria")
-        self.assertIn("laser", pr.info.get("avviso", ""))
-
-    def test_laser_stato_non_normale_ignorato(self):
-        from misura import stima_foto
-        m, p = leggi(CAM6)
-        out = stima_foto.costruisci(dataclasses.replace(m, lrf_status="NoSignal"), p, [3000, 500, 5064, 6048], None)
-        self.assertIsInstance(out, stima_foto.NessunaStima)  # niente laser e base fuori foto
-
-    def test_laser_ha_incertezza_propria(self):
-        from misura import stima_foto
-        m, p = leggi(CAM6)
-        # base fuori foto: nessun confronto possibile, si usa il laser
-        pr = stima_foto.costruisci(m, p, [3000, 500, 5064, 6048], None)
-        self.assertEqual(pr.info["fonte_distanza"], "laser")
-        d = [np.linalg.norm(pl.p0 - c.pos) for c, pl in pr.campioni]  # distanza lungo il raggio laser
-        self.assertGreater(np.std(d), 0.1)
 
 
 class MetadatiTuttiIPercorsiTest(unittest.TestCase):
@@ -166,8 +126,12 @@ class ValidazioniApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 422)
 
     def test_fattore_non_valido_rifiutato(self):
-        r = self.c.post("/api/misura/stima", json={"result_id": "r", "fattore": 0})
+        r = self.c.post("/api/misura/sessione/calcola", json={"sha_principale": "a", "result_id": "r", "fattore": 0})
         self.assertEqual(r.status_code, 422)
+
+    def test_stima_da_una_foto_rimossa(self):
+        r = self.c.post("/api/misura/stima", json={"result_id": "r"})
+        self.assertEqual(r.status_code, 404)
 
 
 if __name__ == "__main__":
